@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>비디오 모니터 서버</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        .content {
+            padding: 30px;
+        }
+        .video-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .video-item {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        .video-item:hover {
+            border-color: #667eea;
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        .video-item h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 1.2em;
+        }
+        .video-info {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }
+        .play-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+        }
+        .play-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .video-player {
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 20px;
+            display: none;
+        }
+        .video-player video {
+            width: 100%;
+            height: auto;
+            max-height: 600px;
+        }
+        .close-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }
+        .close-btn:hover {
+            background: #c82333;
+        }
+        .no-videos {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+            font-size: 1.2em;
+        }
+        .file-size {
+            background: #e9ecef;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            color: #495057;
+            display: inline-block;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎥 비디오 모니터 서버</h1>
+            <p>eval_videos_standing 폴더의 비디오들을 스트리밍으로 시청하세요</p>
+        </div>
+        
+        <div class="content">
+            {% if videos %}
+                <div class="video-list">
+                    {% for video in videos %}
+                    <div class="video-item" onclick="playVideo('{{ video.filename }}')">
+                        <h3>{{ video.filename }}</h3>
+                        <div class="video-info">
+                            <div class="file-size">{{ "%.1f"|format(video.size / 1024) }} KB</div>
+                        </div>
+                        <button class="play-btn">▶ 재생</button>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                <div id="videoPlayer" class="video-player">
+                    <video id="videoElement" controls>
+                        <source id="videoSource" src="" type="video/mp4">
+                        브라우저가 비디오 재생을 지원하지 않습니다.
+                    </video>
+                    <div style="text-align: center; padding: 20px;">
+                        <button class="close-btn" onclick="closeVideo()">닫기</button>
+                    </div>
+                </div>
+            {% else %}
+                <div class="no-videos">
+                    <h2>📁 비디오가 없습니다</h2>
+                    <p>eval_videos_standing 폴더에 MP4 파일을 추가해주세요.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        function playVideo(filename) {
+            const videoPlayer = document.getElementById('videoPlayer');
+            const videoElement = document.getElementById('videoElement');
+            const videoSource = document.getElementById('videoSource');
+            
+            // 비디오 소스 설정
+            videoSource.src = `/stream/${filename}`;
+            videoElement.load();
+            
+            // 비디오 플레이어 표시
+            videoPlayer.style.display = 'block';
+            
+            // 비디오 재생
+            videoElement.play().catch(function(error) {
+                console.log("비디오 재생 중 오류:", error);
+            });
+        }
+        
+        function closeVideo() {
+            const videoPlayer = document.getElementById('videoPlayer');
+            const videoElement = document.getElementById('videoElement');
+            
+            // 비디오 정지
+            videoElement.pause();
+            videoElement.currentTime = 0;
+            
+            // 비디오 플레이어 숨김
+            videoPlayer.style.display = 'none';
+        }
+        
+        // ESC 키로 비디오 닫기
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeVideo();
+            }
+        });
+    </script>
+</body>
+</html> 
