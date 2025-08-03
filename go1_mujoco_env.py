@@ -5,7 +5,7 @@ import mujoco
 
 import numpy as np
 from pathlib import Path
-
+ 
 
 DEFAULT_CAMERA_CONFIG = {
     "azimuth": 90.0,
