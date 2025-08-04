@@ -179,7 +179,10 @@ class BipedWalkingReward:
             # 페널티
             'energy': -0.02,               # 에너지 효율
             'joint_limit': -2.0,           # 관절 한계
-            'excessive_motion': -3.0       # 과도한 움직임
+            'excessive_motion': -3.0,      # 과도한 움직임
+            
+            # ✅ [수정] 머리를 숙이는 잘못된 자세에 대한 강력한 페널티 추가
+            'pitch_down_penalty': -20.0
         }
         
         # 2족 보행 단계별 목표
@@ -224,79 +227,91 @@ class BipedWalkingReward:
         total_reward = 0.0
         reward_info = {}
         
-        # 1. 2족 자세 보상
+        # ✅ [수정] 보상 계산에 필요한 주요 변수들을 함수 상단에서 미리 계산
+        trunk_quat = data.qpos[3:7]
+        trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
+        up_vector = trunk_rotation_matrix[:, 2]
+        current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
+        
         front_feet_height = self._get_front_feet_height(model, data)
         rear_feet_contact = self._get_rear_feet_contact(model, data)
-        
-        # 앞발이 높이 들려있고, 뒷발만 접촉
-        bipedal_score = np.mean(front_feet_height) * np.mean(rear_feet_contact)
-        total_reward += self.weights['bipedal_posture'] * bipedal_score
-        reward_info['bipedal_posture'] = bipedal_score
-        
-        # 2. 높이 보상 (2족은 더 높아야 함)
         trunk_height = data.qpos[2]
-        target_height = 0.45  # 2족 목표 높이
-        height_error = abs(trunk_height - target_height)
-        height_reward = np.exp(-10 * height_error) if trunk_height > 0.3 else 0
-        total_reward += self.weights['height'] * height_reward
-        reward_info['height'] = height_reward
         
-        # 3. 앞발 들기 보상
-        min_lift_height = 0.05  # 최소 5cm 이상
-        front_feet_up_reward = 0
-        for height in front_feet_height:
-            if height > min_lift_height:
-                front_feet_up_reward += np.tanh(height / 0.1)  # 부드러운 보상
-        front_feet_up_reward /= 2  # 정규화
-        total_reward += self.weights['front_feet_up'] * front_feet_up_reward
-        reward_info['front_feet_up'] = front_feet_up_reward
+        # ✅ [수정] 1. 머리를 숙이는 자세(심한 positive pitch)에 대해 강력한 페널티 부과
+        # 머리가 15도 이상 숙여지면 페널티를 주기 시작
+        pitch_down_threshold = np.deg2rad(15)
+        if current_pitch > pitch_down_threshold:
+            pitch_penalty_amount = (current_pitch - pitch_down_threshold) ** 2
+            pitch_down_reward = self.weights['pitch_down_penalty'] * pitch_penalty_amount
+            total_reward += pitch_down_reward
+            reward_info['pitch_down_penalty'] = pitch_down_reward
+        else:
+            reward_info['pitch_down_penalty'] = 0.0
+            
+        # ✅ [수정] 2. '올바른 자세'일 때만 다른 보상들을 받을 수 있도록 조건 강화
+        # 몸통이 심하게 숙여지지 않았을 때를 '유효한 자세'로 간주
+        is_valid_posture = current_pitch < np.deg2rad(30)
         
-        # 4. 무게중심이 뒷발 위에 있는지
+        # 3. 2족 자세 보상 (앞발 들고, 뒷발 닿기)
+        if is_valid_posture:
+            bipedal_score = np.mean(front_feet_height) * np.mean(rear_feet_contact)
+            total_reward += self.weights['bipedal_posture'] * bipedal_score
+            reward_info['bipedal_posture'] = bipedal_score
+        else:
+            reward_info['bipedal_posture'] = 0.0
+
+        # 4. 높이 보상 (2족은 더 높아야 함)
+        if is_valid_posture:
+            target_height = 0.45  # 2족 목표 높이
+            height_error = abs(trunk_height - target_height)
+            height_reward = np.exp(-10 * height_error) if trunk_height > 0.3 else 0
+            total_reward += self.weights['height'] * height_reward
+            reward_info['height'] = height_reward
+        else:
+            reward_info['height'] = 0.0
+        
+        # 5. 앞발 들기 보상
+        if is_valid_posture:
+            min_lift_height = 0.05
+            front_feet_up_reward = 0
+            for height in front_feet_height:
+                if height > min_lift_height:
+                    front_feet_up_reward += np.tanh(height / 0.1)
+            front_feet_up_reward /= 2
+            total_reward += self.weights['front_feet_up'] * front_feet_up_reward
+            reward_info['front_feet_up'] = front_feet_up_reward
+        else:
+            reward_info['front_feet_up'] = 0.0
+            
+        # 6. 무게중심이 뒷발 위에 있는지
         com_position = self._get_com_position(model, data)
         rear_feet_positions = self._get_rear_feet_positions(model, data)
-        
-        # 무게중심의 x,y가 뒷발 사이에 있는지 확인
         com_score = self._compute_com_over_support(com_position, rear_feet_positions)
         total_reward += self.weights['com_over_support'] * com_score
         reward_info['com_over_support'] = com_score
         
-        # 5. 상체 직립 보상 - 수정됨: 완전히 수직을 목표로
-        trunk_quat = data.qpos[3:7]
-        trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-        
-        # 수직 자세를 목표로 (0도, 허용 오차 ±5도)
-        current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
-        
-        # pitch가 0에 가까울수록 높은 보상
+        # 7. 상체 직립 보상 (기존 로직 유지)
         pitch_penalty = abs(current_pitch)
-        
-        # up_vector[2]가 1에 가까울수록 (완전히 수직일수록) 높은 보상
-        verticality_reward = up_vector[2] ** 3  # 3제곱으로 더 강한 수직 유도
-        
-        # 두 가지 요소 결합: 수직도 + pitch 각도
+        verticality_reward = up_vector[2] ** 3
         torso_reward = verticality_reward * np.exp(-10 * pitch_penalty)
-        
-        # 추가 보너스: 거의 수직일 때 (±3도 이내)
         if abs(current_pitch) < np.deg2rad(3):
             torso_reward *= 1.5
-        
         total_reward += self.weights['torso_upright'] * torso_reward
         reward_info['torso_upright'] = torso_reward
         
-        # 6. 안정성 보상
+        # 8. 안정성 보상
         angular_vel = data.qvel[3:6]
         angular_stability = np.exp(-2 * np.linalg.norm(angular_vel))
         total_reward += self.weights['angular_stability'] * angular_stability
         reward_info['angular_stability'] = angular_stability
         
-        # 7. 에너지 페널티 (2족은 더 많은 토크 허용)
+        # 9. 에너지 페널티
         motor_efforts = np.sum(np.square(data.ctrl))
-        energy_penalty = motor_efforts * 0.5  # 페널티 완화
+        energy_penalty = motor_efforts * 0.5
         total_reward += self.weights['energy'] * energy_penalty
         reward_info['energy'] = -energy_penalty
         
-        # 8. 단계별 보너스 - 수정됨: 수직 자세 추가 고려
+        # 10. 단계별 보너스
         stage_bonus = self._compute_stage_bonus(front_feet_height, rear_feet_contact, 
                                                trunk_height, current_pitch)
         total_reward += stage_bonus
