@@ -1,0 +1,26 @@
+{
+  "timesteps": 29513512,
+  "best_reward": -Infinity,
+  "upside_down_attempts": 0,
+  "args": {
+    "task": "standing",
+    "pretrained_model": ".\\models\\2024-04-16_10-11-57-x=1_torque_ctrl_fixed_joint_range_5mill_iter_working_well\\final_model.zip",
+    "visual_interval": 60.0,
+    "show_duration": 5,
+    "save_videos": true,
+    "total_timesteps": 20000000000,
+    "num_envs": 8,
+    "video_interval": 1000000,
+    "use_curriculum": false,
+    "learning_rate": 0.0002,
+    "batch_size": 128,
+    "n_steps": 1024,
+    "clip_range": 0.15,
+    "entropy_coef": 0.005,
+    "target_vel": 0.0,
+    "stability_weight": 1.5,
+    "height_tolerance": 0.12,
+    "early_stopping": false,
+    "checkpoint_interval": 500000
+  }
+}
