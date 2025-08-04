@@ -4,6 +4,7 @@ models/
 .DS_Store
 .venv/
 recordings/
+eval_videos/
 eval_videos_standing/
 
 
