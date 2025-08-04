@@ -134,9 +134,7 @@ def check_observation_compatibility(pretrained_model_path, current_env):
 def create_optimized_ppo_model(env, args, tensorboard_log=None):
     """2족 보행 최적화된 PPO 모델 생성"""
     
-    # 2족 보행용 학습률 스케줄 - 점진적으로 학습률을 줄여 안정적인 수렴 유도
     def standing_lr_schedule(progress_remaining):
-        # 초기에는 비교적 높은 학습률, 점차 감소
         if progress_remaining > 0.8:
             return 1e-4
         elif progress_remaining > 0.5:
@@ -144,7 +142,6 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
         else:
             return 1e-5
             
-    # 클립 범위도 점진적으로 줄여 학습 후반부의 안정성 확보
     def clip_range_schedule(progress_remaining):
         if progress_remaining > 0.5:
             return 0.2
@@ -154,28 +151,27 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
     lr_schedule = standing_lr_schedule
     clip_range = clip_range_schedule
     
-    # 2족 보행 최적화 PPO 하이퍼파라미터
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=lr_schedule,
-        n_steps=4096,               # [수정] 더 많은 경험을 바탕으로 업데이트 (기존 1024)
-        batch_size=256,             # [수정] 배치 크기 증가
+        n_steps=4096,
+        batch_size=256,
         n_epochs=10,
-        gamma=0.99,                 # [수정] 감마 값 조정
+        gamma=0.99,
         gae_lambda=0.95,
-        clip_range=clip_range,      # [수정] 정책 업데이트 폭 제한 강화
-        ent_coef=0.001,             # [수정] 엔트로피 계수 감소
+        clip_range=clip_range,
+        ent_coef=0.005,             # ✅ [수정] 초기 탐험을 장려하기 위해 엔트로피 계수 약간 증가 (기존 0.001)
         vf_coef=0.5,
         max_grad_norm=0.5,
         use_sde=False,
         tensorboard_log=tensorboard_log,
         verbose=1,
         policy_kwargs=dict(
-            net_arch=[dict(pi=[512, 256], vf=[512, 256])], # [수정] 신경망 용량 증가
-            activation_fn=torch.nn.ReLU, # [수정] Tanh -> ReLU
+            net_arch=[dict(pi=[512, 256], vf=[512, 256])],
+            activation_fn=torch.nn.ReLU,
             ortho_init=True,
-            log_std_init=-2.0 # [수정] 초기 탐험 강도 조절
+            log_std_init=-2.0
         ),
         device='auto'
     )
