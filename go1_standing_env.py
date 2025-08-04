@@ -536,6 +536,11 @@ class Go1StandingEnv(Go1MujocoEnv):
         
         # 전체 관찰 상태 = 기본(45) + 확장(11) = 56차원
         return np.concatenate([base_obs, extended_info])
+
+    def _get_base_obs(self):
+        """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
+        # 부모 클래스의 관찰 방법 사용
+        return super()._get_obs()
     
     def _get_obs(self):
         """관찰 상태 반환 - 호환성 모드에 따라 선택"""
