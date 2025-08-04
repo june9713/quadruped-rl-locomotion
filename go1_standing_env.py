@@ -801,7 +801,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         self.data.qpos[3:7] = quat
         
         # 3. 완전 랜덤 관절 각도 (관절 한계 내에서)
-        joint_ranges = self.model.jnt_range[1:13]  # 관절 범위
+        joint_ranges = self.model.jnt_range[1:]  # 관절 범위
         random_joints = []
         
         for i, (min_angle, max_angle) in enumerate(joint_ranges):
