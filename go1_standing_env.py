@@ -36,14 +36,19 @@ class StandingReward:
         total_reward = 0.0
         reward_info = {}
 
-        # 1. 똑바로 서있기 보상 (4족 기준)
+        # 1. 똑바로 서있기 보상 (물구나무서기 방지)
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
         up_vector = trunk_rotation_matrix[:, 2]  # z축 방향
 
-        # 몸체가 수평하게 서있어야 함 (4족 보행)
-        upright_reward = up_vector[2]  # z 성분이 1에 가까울수록 좋음
-        upright_reward = max(0, upright_reward)
+        # ✅ 물구나무서기 감지 및 페널티
+        trunk_height = data.qpos[2]
+        if trunk_height < 0.15:  # 너무 낮으면 물구나무서기 의심
+            upright_reward = -10.0  # 강한 페널티
+        elif up_vector[2] > 0.8:  # 정상 방향이고 충분히 직립
+            upright_reward = up_vector[2]
+        else:
+            upright_reward = 0.0
         total_reward += self.weights['upright'] * upright_reward
         reward_info['upright'] = upright_reward
 
@@ -244,13 +249,13 @@ class Go1StandingEnv(Go1MujocoEnv):
         #                RR_hip, RR_thigh, RR_calf, RL_hip, RL_thigh, RL_calf]
         
         joint_targets = np.array([
-            # 앞다리 (FR, FL) - 자연스러운 서있는 자세
-            0.0, 0.8, -1.6,    # FR: hip, thigh, calf
-            0.0, 0.8, -1.6,    # FL: 좌우 대칭
+            # 앞다리 (FR, FL) - 더 안정적으로
+            0.0, 0.6, -1.2,    # FR: 덜 굽혀서 안정성 확보
+            0.0, 0.6, -1.2,    # FL: 좌우 대칭
             
-            # 뒷다리 (RR, RL) - 자연스러운 서있는 자세  
-            0.0, 1.0, -1.8,    # RR: hip, thigh, calf
-            0.0, 1.0, -1.8     # RL: 좌우 대칭
+            # 뒷다리 (RR, RL) - 더 안정적으로
+            0.0, 0.8, -1.5,    # RR: 적당히 굽혀서 지지
+            0.0, 0.8, -1.5     # RL: 좌우 대칭
         ])
 
         # 작은 노이즈 추가 (자연스러운 변동)
@@ -374,9 +379,14 @@ class Go1StandingEnv(Go1MujocoEnv):
         return obs, reward, terminated, truncated, info
 
     def _is_terminated(self):
-        """종료 조건 - 4족 서있기 기준"""
+        """종료 조건 - 물구나무서기 방지 추가"""
         # 기본 건강 상태 확인
         if not self.is_healthy:
+            return True
+
+        # ✅ 물구나무서기 즉시 종료
+        if self.data.qpos[2] < 0.15:  # 높이가 15cm 이하
+            print("🚨 물구나무서기 감지 - 에피소드 종료")
             return True
 
         # 높이 체크 (너무 낮거나 높으면 종료)
