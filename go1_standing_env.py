@@ -32,6 +32,122 @@ class StandingReward:
             'smooth_motion': 3.0    # 부드러운 동작
         }
 
+    def compute_reward(self, model, data):
+        """4족 서있기 보상 계산"""
+        total_reward = 0.0
+        reward_info = {}
+        
+        # 1. 높이 보상 (4족 서있기 목표 높이)
+        trunk_height = data.qpos[2]
+        target_height = 0.31  # 4족 서있기 목표 높이
+        height_error = abs(trunk_height - target_height)
+        height_reward = np.exp(-10 * height_error) if 0.22 < trunk_height < 0.40 else 0
+        total_reward += self.weights['height'] * height_reward
+        reward_info['height'] = height_reward
+        
+        # 2. 직립도 보상
+        trunk_quat = data.qpos[3:7]
+        trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
+        up_vector = trunk_rotation_matrix[:, 2]
+        upright_reward = np.exp(-5 * (1 - up_vector[2])**2) if up_vector[2] > 0.85 else 0
+        total_reward += self.weights['upright'] * upright_reward
+        reward_info['upright'] = upright_reward
+        
+        # 3. 발 접촉 보상
+        foot_contacts = self._get_foot_contacts(model, data)
+        contact_reward = np.mean(foot_contacts)  # 모든 발이 접촉할수록 높은 보상
+        total_reward += self.weights['foot_contact'] * contact_reward
+        reward_info['foot_contact'] = contact_reward
+        
+        # 4. 안정성 보상 (속도 제한)
+        linear_vel = np.linalg.norm(data.qvel[:3])
+        angular_vel = np.linalg.norm(data.qvel[3:6])
+        stability_reward = np.exp(-2 * (linear_vel + angular_vel))
+        total_reward += self.weights['balance'] * stability_reward
+        reward_info['balance'] = stability_reward
+        
+        # 5. 좌우 안정성 보상
+        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
+        lateral_reward = np.exp(-5 * roll_angle**2)
+        total_reward += self.weights['lateral_stability'] * lateral_reward
+        reward_info['lateral_stability'] = lateral_reward
+        
+        # 6. 에너지 효율 페널티
+        joint_vel = data.qvel[7:]  # 관절 속도
+        energy_penalty = np.sum(joint_vel**2)
+        total_reward += self.weights['energy'] * energy_penalty
+        reward_info['energy'] = -energy_penalty
+        
+        # 7. 관절 한계 페널티
+        joint_pos = data.qpos[7:]
+        joint_ranges = model.jnt_range[1:]  # 첫 번째는 root joint
+        limit_penalty = 0.0
+        for i, pos in enumerate(joint_pos):
+            if pos < joint_ranges[i, 0]:
+                limit_penalty += (joint_ranges[i, 0] - pos) ** 2
+            elif pos > joint_ranges[i, 1]:
+                limit_penalty += (pos - joint_ranges[i, 1]) ** 2
+        total_reward += self.weights['joint_limit'] * limit_penalty
+        reward_info['joint_limit'] = -limit_penalty
+        
+        # 8. 좌우 대칭성 보상
+        joint_pos = data.qpos[7:19]
+        front_diff = np.sum(np.abs(joint_pos[0:3] - joint_pos[3:6]))
+        rear_diff = np.sum(np.abs(joint_pos[6:9] - joint_pos[9:12]))
+        symmetry_error = front_diff + rear_diff
+        symmetry_reward = np.exp(-2 * symmetry_error)
+        total_reward += self.weights['symmetry'] * symmetry_reward
+        reward_info['symmetry'] = symmetry_reward
+        
+        # 9. 부드러운 동작 보상
+        if hasattr(self, '_prev_joint_pos'):
+            joint_acc = np.sum((joint_pos - self._prev_joint_pos)**2)
+            smooth_reward = np.exp(-5 * joint_acc)
+            total_reward += self.weights['smooth_motion'] * smooth_reward
+            reward_info['smooth_motion'] = smooth_reward
+        else:
+            reward_info['smooth_motion'] = 0.0
+        
+        self._prev_joint_pos = joint_pos.copy()
+        
+        return total_reward, reward_info
+
+    def _quat_to_rotmat(self, quat):
+        """Quaternion을 rotation matrix로 변환"""
+        w, x, y, z = quat
+        return np.array([
+            [1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * w * z, 2 * x * z + 2 * w * y],
+            [2 * x * y + 2 * w * z, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * w * x],
+            [2 * x * z - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y]
+        ])
+
+    def _get_foot_contacts(self, model, data):
+        """발 접촉 감지"""
+        foot_names = ["FR", "FL", "RR", "RL"]
+        contacts = []
+
+        for foot_name in foot_names:
+            try:
+                foot_geom_id = model.geom(foot_name).id
+                contact = False
+
+                for i in range(data.ncon):
+                    contact_geom1 = data.contact[i].geom1
+                    contact_geom2 = data.contact[i].geom2
+
+                    if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
+                        # 접촉력 확인
+                        contact_force = np.linalg.norm(data.contact[i].force)
+                        if contact_force > 0.1:  # 의미있는 접촉
+                            contact = True
+                            break
+
+                contacts.append(1.0 if contact else 0.0)
+            except:
+                contacts.append(0.0)
+
+        return contacts
+
 
 class BipedWalkingReward:
     """2족 보행을 위한 보상 함수"""
