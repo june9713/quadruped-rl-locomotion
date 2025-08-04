@@ -1059,7 +1059,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         obs = self._get_obs()
 
-        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data)
+        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action)
 
         terminated = self._is_terminated()
         truncated = self.episode_length >= self.max_episode_length
