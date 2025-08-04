@@ -469,62 +469,31 @@ class Go1StandingEnv(Go1MujocoEnv):
         # 진행도 계산 (0.0 ~ 1.0)
         progress = min(self.total_timesteps / self.max_training_timesteps, 1.0)
         
-        # 초기에는 큰 노이즈, 점차 감소
-        # 지수 감소 함수 사용: initial_scale * exp(-4 * progress)
-        initial_scale = 0.25  # 초기 노이즈 (매우 큰 변동)
-        final_scale = 0.02    # 최종 노이즈 (작은 변동)
+        # 초기에는 매우 큰 노이즈, 점차 감소
+        # 이전보다 더 큰 초기 노이즈와 더 급격한 감소
+        initial_scale = 0.35  # 초기 노이즈 증가 (이전 0.25 -> 0.35)
+        final_scale = 0.015   # 최종 노이즈 감소 (이전 0.02 -> 0.015)
         
-        # 부드러운 지수 감소
-        noise_scale = final_scale + (initial_scale - final_scale) * np.exp(-4 * progress)
+        # 다단계 감소 함수 사용
+        if progress < 0.2:
+            # 초기 20%: 매우 큰 노이즈 유지
+            noise_scale = initial_scale
+        elif progress < 0.5:
+            # 20-50%: 천천히 감소
+            t = (progress - 0.2) / 0.3
+            noise_scale = initial_scale * (1 - t * 0.3)  # 30% 감소
+        elif progress < 0.8:
+            # 50-80%: 더 빠르게 감소
+            t = (progress - 0.5) / 0.3
+            mid_scale = initial_scale * 0.7
+            noise_scale = mid_scale * (1 - t * 0.6)  # 60% 추가 감소
+        else:
+            # 80-100%: 최종 미세 조정
+            t = (progress - 0.8) / 0.2
+            low_scale = initial_scale * 0.28
+            noise_scale = low_scale * (1 - t * 0.9) + final_scale * t
         
         return noise_scale
-
-
-    def _get_base_obs(self):
-        """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
-        # 부모 클래스의 관찰 방법 사용
-        return super()._get_obs()
-    
-    def _get_extended_obs(self):
-        """확장된 관찰 상태 (2족 보행용 추가 정보 포함)"""
-        # 기본 정보 (45차원)
-        base_obs = self._get_base_obs()
-        
-        # 2족 보행 특화 정보 추가
-        # 1. 발 높이 정보
-        foot_heights = np.array([
-            self._get_foot_height('FR'),
-            self._get_foot_height('FL'),
-            self._get_foot_height('RR'),
-            self._get_foot_height('RL')
-        ])
-        
-        # 2. 발 접촉 정보 - 환경별 보상 객체 사용
-        reward_obj = self._get_reward_object()
-        if reward_obj:
-            foot_contacts = np.array(reward_obj._get_foot_contacts(self.model, self.data))
-        else:
-            # 보상 객체가 없으면 직접 계산
-            foot_contacts = np.array(self._get_foot_contacts_direct())
-        
-        # 3. 상체 기울기 (pitch, roll)
-        trunk_quat = self.data.qpos[3:7]
-        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
-        
-        # 4. 목표 자세 정보 (2족 서기 목표)
-        target_height = 0.45  # 2족 목표 높이
-        height_error = abs(self.data.qpos[2] - target_height)
-        
-        # 추가 정보 결합 (11차원)
-        extended_info = np.concatenate([
-            foot_heights,           # 4차원
-            foot_contacts,          # 4차원  
-            [pitch, roll],          # 2차원
-            [height_error]          # 1차원
-        ])
-        
-        # 전체 관찰 상태 = 기본(45) + 확장(11) = 56차원
-        return np.concatenate([base_obs, extended_info])
     
     def _get_obs(self):
         """관찰 상태 반환 - 호환성 모드에 따라 선택"""
@@ -616,54 +585,95 @@ class Go1StandingEnv(Go1MujocoEnv):
         quat_norm = np.linalg.norm(self.data.qpos[3:7])
         self.data.qpos[3:7] /= quat_norm
 
-        # 3. 2족 보행 준비 관절 각도 - 수직 자세에 맞게 조정
+        # 3. 2족 보행 준비 관절 각도 - 매우 다양한 범위의 노이즈
         joint_noise_scale = noise_scale * 1.5  # 2족은 더 큰 노이즈 필요
         
         # 기본 2족 준비 자세 - 수직 자세를 고려한 관절 각도
         base_joint_targets = np.array([
-            # 앞다리 (FR, FL) - 들기 준비, 몸이 수직일 때 적절한 각도
-            0.0, 0.5, -1.0,    # FR (무릎 더 굽히고, 발목 덜 굽히기)
+            # 앞다리 (FR, FL) - 들기 준비
+            0.0, 0.5, -1.0,    # FR
             0.0, 0.5, -1.0,    # FL
             
-            # 뒷다리 (RR, RL) - 지지 준비, 수직 자세 지탱
-            0.0, 0.6, -1.2,    # RR (더 안정적인 각도)
+            # 뒷다리 (RR, RL) - 지지 준비
+            0.0, 0.6, -1.2,    # RR
             0.0, 0.6, -1.2     # RL
         ])
         
-        # 각 관절에 큰 노이즈 추가
-        joint_noise = np.random.normal(0, joint_noise_scale, 12)
+        # 각 관절마다 매우 다른 범위의 노이즈 적용
+        joint_noise = np.zeros(12)
+        
+        for i in range(12):
+            # 관절 종류와 다리 위치에 따라 다른 노이즈 범위
+            if i < 6:  # 앞다리
+                if i % 3 == 0:  # Hip joints (0, 3)
+                    range_multiplier = np.random.uniform(0.3, 1.2)
+                elif i % 3 == 1:  # Knee joints (1, 4) - 앞다리 무릎은 큰 범위
+                    range_multiplier = np.random.uniform(1.0, 3.0)
+                else:  # Ankle joints (2, 5) - 앞다리 발목도 큰 범위
+                    range_multiplier = np.random.uniform(0.8, 2.5)
+            else:  # 뒷다리
+                if i % 3 == 0:  # Hip joints (6, 9)
+                    range_multiplier = np.random.uniform(0.4, 1.0)
+                elif i % 3 == 1:  # Knee joints (7, 10)
+                    range_multiplier = np.random.uniform(0.6, 1.8)
+                else:  # Ankle joints (8, 11)
+                    range_multiplier = np.random.uniform(0.5, 1.5)
+            
+            # 기본 노이즈
+            joint_noise[i] = np.random.uniform(-joint_noise_scale * range_multiplier, 
+                                             joint_noise_scale * range_multiplier)
         
         # 초기 훈련에서는 극단적인 자세도 시도
         if noise_scale > 0.15:
             # 앞다리를 아예 높이 들어올리는 시도
             if np.random.random() < 0.3:  # 30% 확률
-                joint_noise[1] += np.random.uniform(-0.8, -0.3)  # FR 무릎 더 굽히기
-                joint_noise[2] += np.random.uniform(0.3, 0.8)    # FR 발목 더 들기
-                joint_noise[4] += np.random.uniform(-0.8, -0.3)  # FL 무릎 더 굽히기
-                joint_noise[5] += np.random.uniform(0.3, 0.8)    # FL 발목 더 들기
+                extreme_lift = np.random.uniform(2.0, 4.0)
+                joint_noise[1] += np.random.uniform(-1.2, -0.3) * extreme_lift  # FR 무릎 더 굽히기
+                joint_noise[2] += np.random.uniform(0.3, 1.2) * extreme_lift    # FR 발목 더 들기
+                joint_noise[4] += np.random.uniform(-1.2, -0.3) * extreme_lift  # FL 무릎 더 굽히기
+                joint_noise[5] += np.random.uniform(0.3, 1.2) * extreme_lift    # FL 발목 더 들기
             
-            # 뒷다리 더 굽히기/펴기 - 수직 자세 유지를 위해
+            # 뒷다리 극단적 자세 - 수직 자세 유지를 위해
             if np.random.random() < 0.4:  # 40% 확률
-                joint_noise[7] += np.random.uniform(-0.4, 0.4)   # RR 무릎
-                joint_noise[8] += np.random.uniform(-0.4, 0.4)   # RR 발목
-                joint_noise[10] += np.random.uniform(-0.4, 0.4)  # RL 무릎
-                joint_noise[11] += np.random.uniform(-0.4, 0.4)  # RL 발목
+                extreme_support = np.random.uniform(1.5, 3.0)
+                joint_noise[7] += np.random.uniform(-0.6, 0.6) * extreme_support   # RR 무릎
+                joint_noise[8] += np.random.uniform(-0.6, 0.6) * extreme_support   # RR 발목
+                joint_noise[10] += np.random.uniform(-0.6, 0.6) * extreme_support  # RL 무릎
+                joint_noise[11] += np.random.uniform(-0.6, 0.6) * extreme_support  # RL 발목
+            
+            # 비대칭 극단적 움직임
+            if np.random.random() < 0.25:  # 25% 확률
+                # 한쪽 앞다리만 극단적으로 들기
+                if np.random.random() < 0.5:
+                    joint_noise[0:3] += np.random.uniform(-0.5, 0.5) * 2.0  # FR 극단적
+                else:
+                    joint_noise[3:6] += np.random.uniform(-0.5, 0.5) * 2.0  # FL 극단적
         
         # 최종 관절 각도
         joint_targets = base_joint_targets + joint_noise
         
-        # 관절 한계 내로 클리핑
+        # 관절 한계 내로 클리핑 (2족은 한계에 더 가깝게)
         joint_ranges = self.model.jnt_range[1:]
         for i in range(12):
             joint_targets[i] = np.clip(joint_targets[i], 
-                                    joint_ranges[i, 0] * 0.9, 
-                                    joint_ranges[i, 1] * 0.9)
+                                      joint_ranges[i, 0] * 0.95, 
+                                      joint_ranges[i, 1] * 0.95)
         
         self.data.qpos[7:19] = joint_targets
 
-        # 4. 속도 노이즈
+        # 4. 속도 노이즈 - 2족은 더 다양한 속도
         vel_noise_scale = noise_scale * 0.4
-        self.data.qvel[:] = np.random.normal(0, vel_noise_scale, len(self.data.qvel))
+        
+        for i in range(len(self.data.qvel)):
+            if i < 3:  # 선속도
+                vel_range = np.random.uniform(0.5, 2.0)
+            elif i < 6:  # 각속도 - 2족은 더 큰 각속도 변화
+                vel_range = np.random.uniform(0.8, 3.0)
+            else:  # 관절 속도
+                vel_range = np.random.uniform(0.5, 2.5)
+            
+            self.data.qvel[i] = np.random.normal(0, vel_noise_scale * vel_range)
+        
         self.data.qacc[:] = 0.0
 
         # 5. 제어 입력 초기화
@@ -700,7 +710,6 @@ class Go1StandingEnv(Go1MujocoEnv):
         yaw_noise = np.random.uniform(-angle_noise, angle_noise)
         
         # 오일러 각을 쿼터니언으로 변환
-        
         r = Rotation.from_euler('xyz', [roll_noise, pitch_noise, yaw_noise])
         quat = r.as_quat()  # [x, y, z, w] 순서
         
@@ -714,8 +723,8 @@ class Go1StandingEnv(Go1MujocoEnv):
         quat_norm = np.linalg.norm(self.data.qpos[3:7])
         self.data.qpos[3:7] /= quat_norm
 
-        # 3. 관절 각도 - 적응적 노이즈로 다양한 자세 생성
-        joint_noise_scale = noise_scale * 1.2  # 관절 노이즈 (초기 30도 -> 최종 2.4도)
+        # 3. 관절 각도 - 다양한 범위의 적응적 노이즈
+        joint_noise_scale = noise_scale * 1.2  # 기본 관절 노이즈
         
         # 기본 자연스러운 4족 서있기 관절 각도
         base_joint_targets = np.array([
@@ -728,20 +737,51 @@ class Go1StandingEnv(Go1MujocoEnv):
             0.0, 0.8, -1.5     # RL
         ])
         
-        # 각 관절에 큰 노이즈 추가 (초기에는 매우 다양한 자세)
-        joint_noise = np.random.normal(0, joint_noise_scale, 12)
+        # 각 관절마다 다른 범위의 노이즈 적용
+        joint_noise = np.zeros(12)
         
-        # 특별히 일부 관절에는 더 큰 변동 추가 (2족 보행 준비를 위해)
-        if noise_scale > 0.1:  # 초기 훈련 단계에서만
-            # 앞다리 무릎과 발목에 더 큰 변동
-            joint_noise[1] += np.random.uniform(-joint_noise_scale*0.8, joint_noise_scale*0.8)  # FR 무릎
-            joint_noise[2] += np.random.uniform(-joint_noise_scale*0.8, joint_noise_scale*0.8)  # FR 발목
-            joint_noise[4] += np.random.uniform(-joint_noise_scale*0.8, joint_noise_scale*0.8)  # FL 무릎
-            joint_noise[5] += np.random.uniform(-joint_noise_scale*0.8, joint_noise_scale*0.8)  # FL 발목
+        for i in range(12):
+            # 관절별로 다른 노이즈 범위 계수 설정
+            if i % 3 == 0:  # Hip joints (0, 3, 6, 9)
+                range_multiplier = np.random.uniform(0.5, 1.5)
+            elif i % 3 == 1:  # Knee joints (1, 4, 7, 10)
+                range_multiplier = np.random.uniform(0.8, 2.0)  # 무릎은 더 큰 범위
+            else:  # Ankle joints (2, 5, 8, 11)
+                range_multiplier = np.random.uniform(0.7, 1.8)  # 발목도 큰 범위
             
-            # 뒷다리에도 변동 추가
-            joint_noise[7] += np.random.uniform(-joint_noise_scale*0.5, joint_noise_scale*0.5)  # RR 무릎
-            joint_noise[10] += np.random.uniform(-joint_noise_scale*0.5, joint_noise_scale*0.5) # RL 무릎
+            # 초기 훈련 단계에서는 때때로 극단적인 움직임도 시도
+            if noise_scale > 0.15 and np.random.random() < 0.3:
+                # 30% 확률로 매우 큰 범위 (2~4배)
+                extreme_multiplier = np.random.uniform(2.0, 4.0)
+                joint_noise[i] = np.random.uniform(-joint_noise_scale * extreme_multiplier, 
+                                                   joint_noise_scale * extreme_multiplier)
+            else:
+                # 일반적인 경우: 관절별 다른 범위
+                joint_noise[i] = np.random.uniform(-joint_noise_scale * range_multiplier, 
+                                                   joint_noise_scale * range_multiplier)
+        
+        # 특별히 일부 관절 그룹에 추가 변동
+        if noise_scale > 0.1:  # 초기 훈련 단계에서만
+            # 앞다리 전체에 코릴레이션된 움직임 추가
+            if np.random.random() < 0.4:
+                front_leg_bias = np.random.uniform(-joint_noise_scale, joint_noise_scale)
+                joint_noise[0:6] += front_leg_bias * 0.5
+            
+            # 뒷다리 전체에 코릴레이션된 움직임 추가
+            if np.random.random() < 0.4:
+                rear_leg_bias = np.random.uniform(-joint_noise_scale, joint_noise_scale)
+                joint_noise[6:12] += rear_leg_bias * 0.5
+            
+            # 좌우 비대칭 움직임 추가
+            if np.random.random() < 0.3:
+                # 왼쪽 다리들에 추가 노이즈
+                left_bias = np.random.uniform(-joint_noise_scale * 0.5, joint_noise_scale * 0.5)
+                joint_noise[0:3] += left_bias  # FR
+                joint_noise[6:9] += left_bias  # RR
+                
+                # 오른쪽 다리들에 반대 노이즈
+                joint_noise[3:6] -= left_bias * 0.7  # FL
+                joint_noise[9:12] -= left_bias * 0.7  # RL
         
         # 최종 관절 각도 설정
         joint_targets = base_joint_targets + joint_noise
@@ -750,14 +790,23 @@ class Go1StandingEnv(Go1MujocoEnv):
         joint_ranges = self.model.jnt_range[1:]  # 첫 번째는 root joint
         for i in range(12):
             joint_targets[i] = np.clip(joint_targets[i], 
-                                    joint_ranges[i, 0] * 0.9, 
-                                    joint_ranges[i, 1] * 0.9)
+                                      joint_ranges[i, 0] * 0.95, 
+                                      joint_ranges[i, 1] * 0.95)
         
         self.data.qpos[7:19] = joint_targets
 
-        # 4. 속도에도 작은 노이즈 추가 (초기 움직임 다양성)
+        # 4. 속도에도 다양한 범위의 노이즈 추가
         vel_noise_scale = noise_scale * 0.3
-        self.data.qvel[:] = np.random.normal(0, vel_noise_scale, len(self.data.qvel))
+        
+        # 속도 노이즈도 다양한 범위로
+        for i in range(len(self.data.qvel)):
+            if i < 3:  # 선속도
+                vel_range = np.random.uniform(0.5, 1.5)
+            else:  # 각속도 및 관절 속도
+                vel_range = np.random.uniform(0.3, 2.0)
+            
+            self.data.qvel[i] = np.random.normal(0, vel_noise_scale * vel_range)
+        
         self.data.qacc[:] = 0.0
 
         # 5. 제어 입력 초기화
