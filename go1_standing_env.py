@@ -430,8 +430,13 @@ class Go1StandingEnv(Go1MujocoEnv):
             self._get_foot_height('RL')
         ])
         
-        # 2. 발 접촉 정보
-        foot_contacts = np.array(self.standing_reward._get_foot_contacts(self.model, self.data))
+        # 2. 발 접촉 정보 - 환경별 보상 객체 사용
+        reward_obj = self._get_reward_object()
+        if reward_obj:
+            foot_contacts = np.array(reward_obj._get_foot_contacts(self.model, self.data))
+        else:
+            # 보상 객체가 없으면 직접 계산
+            foot_contacts = np.array(self._get_foot_contacts_direct())
         
         # 3. 상체 기울기 (pitch, roll)
         trunk_quat = self.data.qpos[3:7]
@@ -775,7 +780,41 @@ class Go1StandingEnv(Go1MujocoEnv):
             return False
         except:
             return False
+    def _get_foot_contacts_direct(self):
+        """보상 객체 없이 직접 발 접촉 계산"""
+        foot_names = ["FR", "FL", "RR", "RL"]
+        contacts = []
 
+        for foot_name in foot_names:
+            try:
+                foot_geom_id = self.model.geom(foot_name).id
+                contact = False
+
+                for i in range(self.data.ncon):
+                    contact_geom1 = self.data.contact[i].geom1
+                    contact_geom2 = self.data.contact[i].geom2
+
+                    if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
+                        # 접촉력 확인
+                        contact_force = np.linalg.norm(self.data.contact[i].force)
+                        if contact_force > 0.1:  # 의미있는 접촉
+                            contact = True
+                            break
+
+                contacts.append(1.0 if contact else 0.0)
+            except:
+                contacts.append(0.0)
+
+        return contacts
+
+    def _get_reward_object(self):
+        """현재 환경의 보상 객체 반환"""
+        if hasattr(self, 'bipedal_reward'):
+            return self.bipedal_reward
+        elif hasattr(self, 'standing_reward'):
+            return self.standing_reward
+        else:
+            return None
 
 class BipedalWalkingEnv(Go1StandingEnv):
     """2족 보행 전용 환경 - 관찰 공간 호환성 개선"""
