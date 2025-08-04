@@ -604,11 +604,11 @@ class Go1StandingEnv(Go1MujocoEnv):
         yaw_angle = np.random.uniform(-0.1, 0.1)
         
         # 높이는 웅크린 자세에 맞게 고정 (0.3m)
-        self.data.qpos[2] = 0.3
+        self.data.qpos[2] = 0.62
         
         # Roll, Pitch는 0에 가깝게 설정하여 안정적인 시작 유도
         roll_angle = np.random.uniform(-0.05, 0.05)
-        pitch_angle = np.random.uniform(-0.05, 0.05)
+        pitch_angle = np.random.uniform(-1.5 , -1.5)
         
         r = Rotation.from_euler('xyz', [roll_angle, pitch_angle, yaw_angle])
         quat = r.as_quat() # [x, y, z, w]
@@ -618,11 +618,11 @@ class Go1StandingEnv(Go1MujocoEnv):
         # 안정적으로 웅크린 자세의 기본 관절 각도
         base_joint_targets = np.array([
             # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
-            0.0, 0.8, -1.6,
-            0.0, 0.8, -1.6,
+            0.0, 0, -1.6,
+            0.0, 0, -1.6,
             # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태
-            0.0, 0.8, -1.6,
-            0.0, 0.8, -1.6,
+            0.0, 2.0, 1,
+            0.0, 2.0, 1,
         ])
         
         # 모든 관절에 작은 노이즈 추가
