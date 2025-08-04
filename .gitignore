@@ -1,5 +1,10 @@
 logs/
 models/
+.vscode/
+.DS_Store
+.venv/
+recordings/
+eval_videos_standing/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
