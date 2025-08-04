@@ -494,6 +494,48 @@ class Go1StandingEnv(Go1MujocoEnv):
             noise_scale = low_scale * (1 - t * 0.9) + final_scale * t
         
         return noise_scale
+
+
+    def _get_extended_obs(self):
+        """확장된 관찰 상태 (2족 보행용 추가 정보 포함)"""
+        # 기본 정보 (45차원)
+        base_obs = self._get_base_obs()
+        
+        # 2족 보행 특화 정보 추가
+        # 1. 발 높이 정보
+        foot_heights = np.array([
+            self._get_foot_height('FR'),
+            self._get_foot_height('FL'),
+            self._get_foot_height('RR'),
+            self._get_foot_height('RL')
+        ])
+        
+        # 2. 발 접촉 정보 - 환경별 보상 객체 사용
+        reward_obj = self._get_reward_object()
+        if reward_obj:
+            foot_contacts = np.array(reward_obj._get_foot_contacts(self.model, self.data))
+        else:
+            # 보상 객체가 없으면 직접 계산
+            foot_contacts = np.array(self._get_foot_contacts_direct())
+        
+        # 3. 상체 기울기 (pitch, roll)
+        trunk_quat = self.data.qpos[3:7]
+        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
+        
+        # 4. 목표 자세 정보 (2족 서기 목표)
+        target_height = 0.45  # 2족 목표 높이
+        height_error = abs(self.data.qpos[2] - target_height)
+        
+        # 추가 정보 결합 (11차원)
+        extended_info = np.concatenate([
+            foot_heights,           # 4차원
+            foot_contacts,          # 4차원  
+            [pitch, roll],          # 2차원
+            [height_error]          # 1차원
+        ])
+        
+        # 전체 관찰 상태 = 기본(45) + 확장(11) = 56차원
+        return np.concatenate([base_obs, extended_info])
     
     def _get_obs(self):
         """관찰 상태 반환 - 호환성 모드에 따라 선택"""
