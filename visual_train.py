@@ -48,28 +48,28 @@ def parse_arguments():
                        help='시뮬레이션 보여주는 시간 (초 단위, 기본값: 15)')
     parser.add_argument('--save_videos', action='store_true',
                        help='비디오 저장 여부')
-    parser.add_argument('--total_timesteps', type=int, default=5_000_000,  # ✅ 증가
+    parser.add_argument('--total_timesteps', type=int, default=5_000_000,
                        help='총 훈련 스텝 수 (기본값: 5,000,000)')
-    parser.add_argument('--num_envs', type=int, default=12,  # ✅ 약간 축소 (안정성)
+    parser.add_argument('--num_envs', type=int, default=12,
                        help='병렬 환경 수 (기본값: 12)')
-    parser.add_argument('--video_interval', type=int, default=150_000,  # ✅ 더 자주
+    parser.add_argument('--video_interval', type=int, default=150_000,
                        help='비디오 녹화 간격 (timesteps, 기본값: 150,000)')
     parser.add_argument('--use_curriculum', action='store_true',
                        help='커리큘럼 학습 사용')
     
-    # ✅ 2족 보행 최적화된 하이퍼파라미터
-    parser.add_argument('--learning_rate', type=float, default=2e-4,  # ✅ 축소 (안정성)
+    # 2족 보행 최적화된 하이퍼파라미터
+    parser.add_argument('--learning_rate', type=float, default=2e-4,
                        help='학습률 (기본값: 2e-4)')
-    parser.add_argument('--batch_size', type=int, default=128,  # ✅ 축소 (안정성)
+    parser.add_argument('--batch_size', type=int, default=128,
                        help='배치 크기 (기본값: 128)')
-    parser.add_argument('--n_steps', type=int, default=1024,  # ✅ 축소 (빈번한 업데이트)
+    parser.add_argument('--n_steps', type=int, default=1024,
                        help='롤아웃 스텝 수 (기본값: 1024)')
-    parser.add_argument('--clip_range', type=float, default=0.15,  # ✅ 축소 (안정적 업데이트)
+    parser.add_argument('--clip_range', type=float, default=0.15,
                        help='PPO 클립 범위 (기본값: 0.15)')
-    parser.add_argument('--entropy_coef', type=float, default=0.005,  # ✅ 축소 (덜 탐험적)
+    parser.add_argument('--entropy_coef', type=float, default=0.005,
                        help='엔트로피 계수 (기본값: 0.005)')
     
-    # ✅ 새로운 2족 보행 특화 파라미터
+    # 새로운 2족 보행 특화 파라미터
     parser.add_argument('--target_vel', type=float, default=0.0,
                        help='목표 속도 (기본값: 0.0 - 제자리 서기)')
     parser.add_argument('--stability_weight', type=float, default=1.5,
@@ -81,29 +81,71 @@ def parse_arguments():
     parser.add_argument('--checkpoint_interval', type=int, default=500_000,
                        help='체크포인트 저장 간격 (기본값: 500,000)')
     
+    # 새로운 옵션: 관찰 공간 호환성
+    parser.add_argument('--ignore_pretrained_obs_mismatch', action='store_true',
+                       help='사전훈련 모델과 관찰공간 불일치 무시하고 새 모델 생성')
+    
     return parser.parse_args()
 
 
-def create_optimized_ppo_model(env, args, tensorboard_log=None):
-    """2족 보행 최적화된 PPO 모델 생성 - clip_range 오류 수정"""
+def check_observation_compatibility(pretrained_model_path, current_env):
+    """사전훈련 모델과 현재 환경의 관찰 공간 호환성 확인"""
+    try:
+        # 임시로 모델 로드해서 observation space 확인
+        if os.path.exists(pretrained_model_path):
+            temp_model = PPO.load(pretrained_model_path, env=None)
+            
+            # 모델의 observation space 추출
+            if hasattr(temp_model.policy, 'observation_space'):
+                model_obs_shape = temp_model.policy.observation_space.shape
+            else:
+                # 정책 네트워크의 첫 번째 레이어 크기로 추정
+                first_layer = next(temp_model.policy.features_extractor.parameters())
+                model_obs_shape = (first_layer.shape[1],)
+            
+            # 현재 환경의 observation space
+            current_obs_shape = current_env.observation_space.shape
+            
+            print(f"🔍 관찰 공간 호환성 확인:")
+            print(f"  사전훈련 모델: {model_obs_shape}")
+            print(f"  현재 환경: {current_obs_shape}")
+            
+            compatible = model_obs_shape == current_obs_shape
+            
+            if compatible:
+                print("✅ 관찰 공간 호환 가능")
+            else:
+                print("❌ 관찰 공간 불일치 감지")
+                print("  옵션:")
+                print("  1. --ignore_pretrained_obs_mismatch 플래그 사용")
+                print("  2. 동일한 환경에서 훈련된 모델 사용")
+                print("  3. 새로운 모델로 훈련 시작")
+            
+            del temp_model  # 메모리 정리
+            return compatible
+            
+    except Exception as e:
+        print(f"⚠️ 호환성 확인 실패: {e}")
+        return False
     
-    # ✅ 2족 보행용 학습률 스케줄
+    return False
+
+
+def create_optimized_ppo_model(env, args, tensorboard_log=None):
+    """2족 보행 최적화된 PPO 모델 생성"""
+    
+    # 2족 보행용 학습률 스케줄
     def standing_lr_schedule(progress_remaining):
         """2족 보행 최적화 학습률 스케줄"""
         if progress_remaining > 0.9:
-            # 초기: 빠른 학습
             return args.learning_rate * 1.2
         elif progress_remaining > 0.7:
-            # 중기: 안정적 학습
             return args.learning_rate
         elif progress_remaining > 0.3:
-            # 후기: 세밀한 조정
             return args.learning_rate * 0.5
         else:
-            # 마지막: 매우 세밀한 조정
             return args.learning_rate * 0.2
     
-    # ✅ 수정: clip_range도 함수로 설정
     def clip_range_schedule(progress_remaining):
         """클립 범위 스케줄"""
         return args.clip_range
@@ -113,33 +155,33 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
         clip_range = clip_range_schedule
     else:
         lr_schedule = args.learning_rate
-        clip_range = clip_range_schedule  # ✅ 항상 함수로 설정
+        clip_range = clip_range_schedule
     
-    # ✅ 2족 보행 최적화 PPO 하이퍼파라미터
+    # 2족 보행 최적화 PPO 하이퍼파라미터
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=lr_schedule,
         n_steps=args.n_steps,
         batch_size=args.batch_size,
-        n_epochs=8,  # 축소 (과적합 방지)
-        gamma=0.995,  # 증가 (장기 안정성 중시)
-        gae_lambda=0.98,  # 증가 (안정성)
-        clip_range=clip_range,  # ✅ 함수로 설정
-        clip_range_vf=0.2,  # value function 클리핑
+        n_epochs=8,
+        gamma=0.995,
+        gae_lambda=0.98,
+        clip_range=clip_range,
+        clip_range_vf=0.2,
         ent_coef=args.entropy_coef,
-        vf_coef=0.8,  # 증가 (value function 중시)
-        max_grad_norm=0.3,  # 축소 (gradient 안정성)
+        vf_coef=0.8,
+        max_grad_norm=0.3,
         use_sde=False,
         sde_sample_freq=-1,
-        target_kl=0.015,  # 증가 (안정적 업데이트)
+        target_kl=0.015,
         tensorboard_log=tensorboard_log,
         verbose=1,
         policy_kwargs=dict(
-            net_arch=[dict(pi=[256, 256, 128], vf=[256, 256, 128])],  # 네트워크 축소
-            activation_fn=torch.nn.Tanh,  # Tanh 사용 (안정적)
+            net_arch=[dict(pi=[256, 256, 128], vf=[256, 256, 128])],
+            activation_fn=torch.nn.Tanh,
             ortho_init=True,
-            log_std_init=-0.5,  # 초기 탐험 축소
+            log_std_init=-0.5,
         ),
         device='auto'
     )
@@ -163,7 +205,7 @@ class StandingTrainingCallback(BaseCallback):
         self.success_rates = deque(maxlen=50)
         self.last_checkpoint = 0
         
-        # ✅ 물구나무서기 통계 추적
+        # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
         
     def _on_step(self) -> bool:
@@ -176,7 +218,7 @@ class StandingTrainingCallback(BaseCallback):
         return True
     
     def _on_rollout_end(self) -> bool:
-        """✅ 롤아웃 종료 시 물구나무서기 통계도 함께 출력"""
+        """롤아웃 종료 시 물구나무서기 통계도 함께 출력"""
         
         # 기존 성능 평가 로직
         if len(self.locals.get('episode_rewards', [])) > 0:
@@ -192,7 +234,7 @@ class StandingTrainingCallback(BaseCallback):
             else:
                 self.no_improvement_steps += self.args.n_steps * self.args.num_envs
         
-        # ✅ 물구나무서기 통계 수집 및 출력
+        # 물구나무서기 통계 수집 및 출력
         self._log_upside_down_statistics()
         
         # 조기 정지 확인
@@ -203,9 +245,8 @@ class StandingTrainingCallback(BaseCallback):
             
         return True
 
-
     def _log_upside_down_statistics(self):
-        """✅ 물구나무서기 통계 로깅"""
+        """물구나무서기 통계 로깅"""
         try:
             # 환경에서 물구나무서기 카운트 수집
             upside_down_counts = []
@@ -231,7 +272,7 @@ class StandingTrainingCallback(BaseCallback):
                 new_attempts = total_upside_down - self.last_upside_down_count
                 avg_per_env = total_upside_down / len(upside_down_counts)
                 
-                # ✅ PPO 로그와 함께 출력될 추가 정보
+                # PPO 로그와 함께 출력될 추가 정보
                 print(f"🚨 물구나무서기 통계:")
                 print(f"   총 시도 횟수: {total_upside_down}회")
                 print(f"   이번 롤아웃 새로운 시도: {new_attempts}회")
@@ -247,6 +288,7 @@ class StandingTrainingCallback(BaseCallback):
                 
         except Exception as e:
             print(f"⚠️ 물구나무서기 통계 수집 실패: {e}")
+    
     def _save_checkpoint(self):
         """체크포인트 저장"""
         checkpoint_dir = Path("checkpoints") / f"{self.args.task}_training"
@@ -255,7 +297,7 @@ class StandingTrainingCallback(BaseCallback):
         checkpoint_path = checkpoint_dir / f"checkpoint_{self.num_timesteps}.zip"
         self.model.save(checkpoint_path)
         
-        # ✅ 물구나무서기 통계도 메타데이터에 포함
+        # 물구나무서기 통계도 메타데이터에 포함
         try:
             upside_down_count = getattr(self.eval_env.standing_reward, 'upside_down_count', 0)
         except:
@@ -264,7 +306,7 @@ class StandingTrainingCallback(BaseCallback):
         metadata = {
             'timesteps': self.num_timesteps,
             'best_reward': self.best_reward,
-            'upside_down_attempts': upside_down_count,  # ✅ 추가
+            'upside_down_attempts': upside_down_count,
             'args': vars(self.args)
         }
         
@@ -279,7 +321,7 @@ class StandingTrainingCallback(BaseCallback):
         best_dir = Path("models") / "best"
         best_dir.mkdir(parents=True, exist_ok=True)
         
-        # ✅ 물구나무서기 통계 포함
+        # 물구나무서기 통계 포함
         try:
             upside_down_count = getattr(self.eval_env.standing_reward, 'upside_down_count', 0)
             upside_down_info = f" (물구나무: {upside_down_count}회)"
@@ -292,7 +334,7 @@ class StandingTrainingCallback(BaseCallback):
 
 
 def train_with_optimized_parameters(args):  
-    """2족 보행 최적화된 훈련 - 오류 수정 버전"""
+    """2족 보행 최적화된 훈련 - 관찰 공간 호환성 수정"""
     print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
     print(f"📊 최적화된 하이퍼파라미터:")
     print(f"  - 학습률: {args.learning_rate}")
@@ -308,7 +350,7 @@ def train_with_optimized_parameters(args):
     print(f"  - 커리큘럼 학습: {'사용' if args.use_curriculum else '미사용'}")
     print(f"  - 조기 정지: {'사용' if args.early_stopping else '미사용'}")
     
-    # ✅ 수정: 환경에 전달할 파라미터만 포함
+    # 환경에 전달할 파라미터만 포함
     env_kwargs = {
         'randomize_physics': True,
     }
@@ -325,16 +367,83 @@ def train_with_optimized_parameters(args):
         env_class = Go1MujocoEnv
         print("🐕 기본 4족 보행 환경 사용")
     
-    # 학습용 환경 (병렬화)
+    # 사전훈련 모델 호환성 확인
+    use_pretrained = False
+    compatible_env_kwargs = env_kwargs.copy()
+    
+    if args.pretrained_model:
+        print(f"\n🔍 사전훈련 모델 호환성 확인 중...")
+        
+        # 모델 경로 확인
+        pretrained_model_path = args.pretrained_model
+        if pretrained_model_path == "latest":
+            models = glob.glob(f"./models/{args.task}*.zip")
+            if models:
+                pretrained_model_path = list(sorted(models))[-1]
+            else:
+                print("❌ 'latest' 모델을 찾을 수 없습니다.")
+                pretrained_model_path = None
+        
+        if pretrained_model_path and os.path.exists(pretrained_model_path):
+            # 임시 환경 생성해서 관찰 공간 확인
+            temp_env = env_class(**env_kwargs)
+            is_compatible = check_observation_compatibility(pretrained_model_path, temp_env)
+            temp_env.close()
+            
+            if is_compatible:
+                use_pretrained = True
+                print("✅ 사전훈련 모델 사용 가능")
+            elif args.ignore_pretrained_obs_mismatch:
+                print("⚠️ 관찰 공간 불일치를 무시하고 새 모델 생성")
+                use_pretrained = False
+            else:
+                print("❌ 관찰 공간 불일치로 인해 사전훈련 모델 사용 불가")
+                print("  해결책:")
+                print("  1. --ignore_pretrained_obs_mismatch 플래그 추가")
+                print("  2. 동일한 환경에서 훈련된 모델 사용")
+                print("  3. 사전훈련 모델 없이 새로 시작")
+                
+                # 호환 모드로 환경 설정 시도
+                print("  4. 호환 모드로 환경 설정 시도 중...")
+                try:
+                    compatible_env_kwargs['use_base_observation'] = True
+                    temp_env_compat = env_class(**compatible_env_kwargs)
+                    is_compatible_retry = check_observation_compatibility(pretrained_model_path, temp_env_compat)
+                    temp_env_compat.close()
+                    
+                    if is_compatible_retry:
+                        print("✅ 호환 모드로 설정 성공!")
+                        use_pretrained = True
+                        env_kwargs = compatible_env_kwargs  # 호환 모드 적용
+                    else:
+                        print("❌ 호환 모드로도 해결되지 않음")
+                        # 사용자 선택 대기
+                        choice = input("\n새 모델로 훈련을 계속하시겠습니까? (y/N): ").lower()
+                        if choice != 'y':
+                            print("훈련 중단")
+                            return
+                        use_pretrained = False
+                except Exception as e:
+                    print(f"⚠️ 호환 모드 설정 실패: {e}")
+                    choice = input("\n새 모델로 훈련을 계속하시겠습니까? (y/N): ").lower()
+                    if choice != 'y':
+                        print("훈련 중단")
+                        return
+                    use_pretrained = False
+        else:
+            print(f"❌ 사전훈련 모델 파일을 찾을 수 없습니다: {pretrained_model_path}")
+            use_pretrained = False
+    
+    # 학습용 환경 (병렬화) - 호환성 적용된 kwargs 사용
     print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중...")
     vec_env = make_vec_env(
         env_class, 
         n_envs=args.num_envs, 
         vec_env_cls=SubprocVecEnv,
-        env_kwargs=env_kwargs
+        env_kwargs=env_kwargs  # 호환성 설정이 적용된 kwargs
     )
     
-    # 평가용 환경
+    # 평가용 환경 - 호환성 적용된 kwargs 사용
     print("📊 평가 환경 생성 중...")
     eval_env = env_class(render_mode="rgb_array", **env_kwargs)
     
@@ -348,7 +457,7 @@ def train_with_optimized_parameters(args):
             save_videos=args.save_videos,
             use_curriculum=args.use_curriculum
         ),
-        StandingTrainingCallback(args, eval_env)  # ✅ 개선된 콜백 사용
+        StandingTrainingCallback(args, eval_env)
     ]
     
     # 비디오 녹화 콜백
@@ -366,23 +475,14 @@ def train_with_optimized_parameters(args):
     # 모델 생성 또는 로드
     tensorboard_log = f"logs/{args.task}_optimized_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    if args.pretrained_model:
-        modelPath = args.pretrained_model
-        pretrained_model = modelPath
-        if modelPath == "latest":
-            models = glob.glob(f"./models/{args.task}*.zip")
-            pretrained_model = list(sorted(models))[-1]
-        elif os.path.exists(args.pretrained_model):
-            pretrained_model = args.pretrained_model
-        
-        print(f"📂 사전 훈련 모델 로드: {pretrained_model}")
-        model = PPO.load(pretrained_model, env=vec_env)
+    if use_pretrained:
+        print(f"📂 사전 훈련 모델 로드: {pretrained_model_path}")
+        model = PPO.load(pretrained_model_path, env=vec_env)
         model.set_env(vec_env)
         
-        # ✅ 수정: clip_range 함수로 설정 (float 오류 해결)
+        # 하이퍼파라미터 업데이트
         if hasattr(model, 'learning_rate'):
             if args.use_curriculum:
-                # 커리큘럼 학습률 스케줄
                 def lr_schedule(progress_remaining):
                     if progress_remaining > 0.9:
                         return args.learning_rate * 1.2
@@ -396,7 +496,6 @@ def train_with_optimized_parameters(args):
             else:
                 model.learning_rate = args.learning_rate
         
-        # ✅ 수정: clip_range를 함수로 설정
         if hasattr(model, 'clip_range'):
             def clip_range_func(progress_remaining):
                 return args.clip_range
@@ -408,7 +507,7 @@ def train_with_optimized_parameters(args):
         print("🆕 새로운 모델 생성 중...")
         model = create_optimized_ppo_model(vec_env, args, tensorboard_log)
     
-    # ✅ 수정: training_time 초기화
+    # training_time 초기화
     training_time = 0.0
     
     # 학습 시작
@@ -424,7 +523,7 @@ def train_with_optimized_parameters(args):
             total_timesteps=args.total_timesteps,
             callback=callbacks,
             progress_bar=True,
-            reset_num_timesteps=False if args.pretrained_model else True
+            reset_num_timesteps=False if use_pretrained else True
         )
         
         training_time = time.time() - start_time
@@ -459,20 +558,27 @@ def train_with_optimized_parameters(args):
     model.save(model_path)
     print(f"✅ 최종 모델 저장: {model_path}")
     
-    # ✅ 수정: training_time 안전하게 사용
+    # 설정 저장
     config_path = os.path.join(report_path, "optimized_training_config.txt")
     with open(config_path, 'w') as f:
         f.write("=== 2족 보행 최적화 훈련 설정 ===\n\n")
         f.write(f"Task: {args.task}\n")
         f.write(f"Total timesteps: {args.total_timesteps:,}\n")
-        f.write(f"Training time: {training_time/3600:.2f} hours\n\n")
+        f.write(f"Training time: {training_time/3600:.2f} hours\n")
+        f.write(f"Used pretrained model: {use_pretrained}\n")
+        if use_pretrained:
+            f.write(f"Pretrained model path: {pretrained_model_path}\n")
+        f.write(f"Environment observation mode: {'Base(45dim)' if env_kwargs.get('use_base_observation', False) else 'Extended(56dim)'}\n")
+        f.write("\n")
         
         f.write("=== 환경 설정 ===\n")
+        f.write(f"Environment class: {env_class.__name__}\n")
         f.write(f"Num environments: {args.num_envs}\n")
         f.write(f"Curriculum learning: {args.use_curriculum}\n")
-        f.write(f"Target velocity: {args.target_vel} m/s (설정값, 환경 내부에서 0.0 사용)\n")
-        f.write(f"Stability weight: {args.stability_weight} (설정값, 환경 내부에서 고정값 사용)\n")
-        f.write(f"Height tolerance: {args.height_tolerance} (설정값, 환경 내부에서 0.15 사용)\n\n")
+        f.write(f"Target velocity: {args.target_vel} m/s\n")
+        f.write(f"Stability weight: {args.stability_weight}\n")
+        f.write(f"Height tolerance: {args.height_tolerance}\n")
+        f.write(f"Use base observation: {env_kwargs.get('use_base_observation', False)}\n\n")
         
         f.write("=== PPO 하이퍼파라미터 ===\n")
         f.write(f"Learning rate: {args.learning_rate}\n")
@@ -487,11 +593,10 @@ def train_with_optimized_parameters(args):
         f.write(f"TensorBoard logs: {tensorboard_log}\n")
         f.write(f"Training reports: {report_path}\n")
         
-        # ✅ 수정: 사전 훈련 모델 정보 추가
-        if args.pretrained_model:
-            f.write(f"Pretrained model: {args.pretrained_model}\n")
-            f.write("Note: clip_range was converted to function to fix compatibility\n")
-    
+        if use_pretrained:
+            f.write(f"Original pretrained model: {args.pretrained_model}\n")
+            f.write(f"Observation compatibility: {'Compatible' if use_pretrained else 'Incompatible - created new model'}\n")
+   
     # 최종 평가
     print(f"\n🧪 최종 모델 평가 중...")
     try:
@@ -513,8 +618,13 @@ def train_with_optimized_parameters(args):
                     break
             
             final_rewards.append(episode_reward)
-            final_successes.append(info.get('standing_success', False))
-            print(f"  평가 {i+1}: 보상={episode_reward:.2f}, 길이={episode_length}, 성공={info.get('standing_success', False)}")
+            # 환경에 따라 다른 성공 키 사용
+            if hasattr(eval_env, 'bipedal_reward'):
+                success_key = 'bipedal_success'
+            else:
+                success_key = 'standing_success'
+            final_successes.append(info.get(success_key, False))
+            print(f"  평가 {i+1}: 보상={episode_reward:.2f}, 길이={episode_length}, 성공={info.get(success_key, False)}")
         
         mean_reward = np.mean(final_rewards)
         success_rate = np.mean(final_successes)
@@ -548,7 +658,13 @@ def train_with_optimized_parameters(args):
     
     if args.use_curriculum:
         print(f"   5. 커리큘럼 진행 상황은 TensorBoard에서 확인하세요")
-
+    
+    if not use_pretrained and args.pretrained_model:
+        print(f"\n💡 참고: 관찰 공간 불일치로 인해 새 모델로 훈련했습니다.")
+        print(f"   호환 가능한 사전훈련 모델을 사용하려면:")
+        print(f"   1. 같은 환경 클래스에서 훈련된 모델 사용")
+        print(f"   2. 또는 --ignore_pretrained_obs_mismatch 플래그 사용")
+        print(f"   3. 또는 환경에 use_base_observation=True 설정")
 
 
 if __name__ == "__main__":

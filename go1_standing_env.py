@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Go1 4족 정상 서있기 환경 - 자연스러운 4족 자세에서 시작
+Go1 4족 정상 서있기 환경 - 자연스러운 4족 자세에서 시작 (관찰 공간 호환성 개선)
 """
 
 import numpy as np
@@ -8,10 +8,13 @@ import mujoco
 from go1_mujoco_env import Go1MujocoEnv
 import math
 from collections import deque
+from gymnasium import spaces
+import os
 
 # visual_train.py에서 import할 수 있도록 환경 이름 추가
 __all__ = ['Go1StandingEnv', 'GradualStandingEnv', 'StandingReward', 
-           'BipedWalkingReward', 'BipedalWalkingEnv', 'BipedalCurriculumEnv']
+           'BipedWalkingReward', 'BipedalWalkingEnv', 'BipedalCurriculumEnv',
+           'create_compatible_env']
 
 
 class StandingReward:
@@ -356,10 +359,8 @@ class BipedWalkingReward:
         ])
 
 
-
-
 class Go1StandingEnv(Go1MujocoEnv):
-    """4족 정상 서있기 환경 - 자연스러운 4족 자세에서 시작"""
+    """4족 정상 서있기 환경 - 자연스러운 4족 자세에서 시작 (관찰 공간 호환성 개선)"""
 
     def __init__(self, **kwargs):
         # 허용되지 않는 파라미터들 제거
@@ -372,9 +373,9 @@ class Go1StandingEnv(Go1MujocoEnv):
         for key, value in kwargs.items():
             if key in allowed_params:
                 filtered_kwargs[key] = value
-            else:
-                # 허용되지 않는 파라미터는 무시
-                pass
+        
+        # ✅ 관찰 공간 호환성을 위한 설정
+        self._use_base_observation = kwargs.get('use_base_observation', False)
         
         # 부모 클래스 초기화 (필터링된 kwargs 사용)
         super().__init__(**filtered_kwargs)
@@ -392,12 +393,106 @@ class Go1StandingEnv(Go1MujocoEnv):
         self.randomize_physics = kwargs.get('randomize_physics', True)
         self.original_gravity = None
 
-        #print("🐕 4족 정상 서있기 환경 초기화 완료")
+        # ✅ 관찰 공간 재설정
+        if self._use_base_observation:
+            # 기본 Go1MujocoEnv와 동일한 관찰 공간 사용 (45차원)
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=self._get_base_obs().shape, 
+                dtype=np.float64
+            )
+            print(f"🔄 호환 모드: 기본 관찰 공간({self._get_base_obs().shape[0]}차원) 사용")
+        else:
+            # 확장된 관찰 공간 사용 (56차원)
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=self._get_extended_obs().shape, 
+                dtype=np.float64
+            )
+            print(f"🔄 확장 모드: 2족 보행 관찰 공간({self._get_extended_obs().shape[0]}차원) 사용")
+
+    def _get_base_obs(self):
+        """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
+        # 부모 클래스의 관찰 방법 사용
+        return super()._get_obs()
+    
+    def _get_extended_obs(self):
+        """확장된 관찰 상태 (2족 보행용 추가 정보 포함)"""
+        # 기본 정보 (45차원)
+        base_obs = self._get_base_obs()
+        
+        # 2족 보행 특화 정보 추가
+        # 1. 발 높이 정보
+        foot_heights = np.array([
+            self._get_foot_height('FR'),
+            self._get_foot_height('FL'),
+            self._get_foot_height('RR'),
+            self._get_foot_height('RL')
+        ])
+        
+        # 2. 발 접촉 정보
+        foot_contacts = np.array(self.standing_reward._get_foot_contacts(self.model, self.data))
+        
+        # 3. 상체 기울기 (pitch, roll)
+        trunk_quat = self.data.qpos[3:7]
+        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
+        
+        # 4. 목표 자세 정보 (2족 서기 목표)
+        target_height = 0.45  # 2족 목표 높이
+        height_error = abs(self.data.qpos[2] - target_height)
+        
+        # 추가 정보 결합 (11차원)
+        extended_info = np.concatenate([
+            foot_heights,           # 4차원
+            foot_contacts,          # 4차원  
+            [pitch, roll],          # 2차원
+            [height_error]          # 1차원
+        ])
+        
+        # 전체 관찰 상태 = 기본(45) + 확장(11) = 56차원
+        return np.concatenate([base_obs, extended_info])
+    
+    def _get_obs(self):
+        """관찰 상태 반환 - 호환성 모드에 따라 선택"""
+        if self._use_base_observation:
+            return self._get_base_obs()
+        else:
+            return self._get_extended_obs()
+
+    def _get_foot_height(self, foot_name):
+        """발 높이 계산"""
+        try:
+            foot_site_id = self.model.site(foot_name).id
+            foot_pos = self.data.site_xpos[foot_site_id]
+            return foot_pos[2]  # z 좌표
+        except:
+            return 0.0
+
+    def _quat_to_euler(self, quat):
+        """Quaternion을 Euler angles로 변환"""
+        w, x, y, z = quat
+        
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        if abs(sinp) >= 1:
+            pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
+        else:
+            pitch = np.arcsin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+        
+        return np.array([roll, pitch, yaw])
 
     def _set_bipedal_ready_pose(self):
         """2족 보행 준비 자세 설정"""
-        
-        #print("🐕 2족 보행 준비 자세로 초기화...")
         
         # 1. 트렁크 위치 - 약간 높게
         self.data.qpos[0] = np.random.uniform(-0.01, 0.01)  # x: 작은 변동
@@ -416,9 +511,6 @@ class Go1StandingEnv(Go1MujocoEnv):
         self.data.qpos[3:7] /= quat_norm
 
         # 3. 2족 보행 준비 관절 각도
-        # Go1 관절 순서: [FR_hip, FR_thigh, FR_calf, FL_hip, FL_thigh, FL_calf,
-        #                RR_hip, RR_thigh, RR_calf, RL_hip, RL_thigh, RL_calf]
-        
         joint_targets = np.array([
             # 앞다리 (FR, FL) - 들기 준비 (약간 굽힘)
             0.0, 0.3, -0.6,    # FR: 들기 준비
@@ -448,13 +540,9 @@ class Go1StandingEnv(Go1MujocoEnv):
 
         # 7. 발이 지면에 접촉하도록 높이 자동 조정
         self._auto_adjust_height_for_ground_contact()
-        
-        #print(f"✅ 2족 보행 준비 자세로 초기화 완료 - 높이: {self.data.qpos[2]:.3f}m")
 
     def _set_natural_standing_pose(self):
-        """✅ 자연스러운 4족 서있기 자세 설정 (기존 메서드 유지)"""
-        
-        #print("🐕 자연스러운 4족 서있기 자세로 초기화...")
+        """자연스러운 4족 서있기 자세 설정"""
         
         # 1. 트렁크 위치 설정
         self.data.qpos[0] = np.random.uniform(-0.01, 0.01)  # x: 작은 변동
@@ -472,9 +560,6 @@ class Go1StandingEnv(Go1MujocoEnv):
         self.data.qpos[3:7] /= quat_norm
 
         # 3. 자연스러운 4족 서있기 관절 각도
-        # Go1 관절 순서: [FR_hip, FR_thigh, FR_calf, FL_hip, FL_thigh, FL_calf,
-        #                RR_hip, RR_thigh, RR_calf, RL_hip, RL_thigh, RL_calf]
-        
         joint_targets = np.array([
             # 앞다리 (FR, FL) - 더 안정적으로
             0.0, 0.6, -1.2,    # FR: 덜 굽혀서 안정성 확보
@@ -504,8 +589,6 @@ class Go1StandingEnv(Go1MujocoEnv):
 
         # 7. 발이 지면에 접촉하도록 높이 자동 조정
         self._auto_adjust_height_for_ground_contact()
-        
-        #print(f"✅ 4족 서있기 자세로 초기화 완료 - 높이: {self.data.qpos[2]:.3f}m")
 
     def _auto_adjust_height_for_ground_contact(self):
         """모든 발이 지면에 접촉하도록 로봇 높이 자동 조정"""
@@ -520,7 +603,6 @@ class Go1StandingEnv(Go1MujocoEnv):
                     foot_pos = self.data.site_xpos[foot_site_id]
                     foot_positions.append(foot_pos[2])  # z 좌표만
                 except:
-                    print(f"⚠️ {foot_name} 발 위치를 찾을 수 없습니다.")
                     continue
             
             if foot_positions:
@@ -537,8 +619,6 @@ class Go1StandingEnv(Go1MujocoEnv):
                 # 물리 시뮬레이션 재적용
                 mujoco.mj_forward(self.model, self.data)
                 
-                #print(f"  높이 조정: {height_adjustment:.3f}m, 최종 높이: {self.data.qpos[2]:.3f}m")
-                
         except Exception as e:
             print(f"⚠️ 높이 자동 조정 실패: {e}")
 
@@ -549,7 +629,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         if self.original_gravity is None:
             self.original_gravity = self.model.opt.gravity.copy()
 
-        # ✅ 자연스러운 4족 서있기 자세로 설정
+        # 자연스러운 4족 서있기 자세로 설정
         self._set_natural_standing_pose()
 
         if self.randomize_physics and self.original_gravity is not None:
@@ -655,6 +735,129 @@ class Go1StandingEnv(Go1MujocoEnv):
         
         return False
 
+    def _is_standing_successful(self):
+        """4족 서있기 성공 판정"""
+        trunk_height = self.data.qpos[2]
+        trunk_quat = self.data.qpos[3:7]
+        trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
+        up_vector = trunk_rotation_matrix[:, 2]
+
+        # 발 접촉 확인
+        foot_contacts = self.standing_reward._get_foot_contacts(self.model, self.data)
+
+        # 성공 조건
+        height_ok = 0.25 < trunk_height < 0.38       # 적절한 높이
+        upright_ok = up_vector[2] > 0.85             # 충분히 직립
+        all_feet_contact = sum(foot_contacts) >= 3.5 # 거의 모든 발이 접촉
+        
+        # 안정성 조건
+        angular_vel = np.linalg.norm(self.data.qvel[3:6])
+        linear_vel = np.linalg.norm(self.data.qvel[:3])
+        stable = angular_vel < 1.0 and linear_vel < 0.5
+
+        # 지속 시간 조건
+        duration_ok = self.episode_length > 100  # 최소 100 스텝 유지
+
+        return (height_ok and upright_ok and all_feet_contact and 
+                stable and duration_ok)
+
+    def _is_foot_contact(self, foot_name):
+        """발 접촉 상태 확인"""
+        try:
+            foot_geom_id = self.model.geom(foot_name).id
+            for i in range(self.data.ncon):
+                contact_geom1 = self.data.contact[i].geom1
+                contact_geom2 = self.data.contact[i].geom2
+                if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
+                    contact_force = np.linalg.norm(self.data.contact[i].force)
+                    if contact_force > 0.1:
+                        return True
+            return False
+        except:
+            return False
+
+
+class BipedalWalkingEnv(Go1StandingEnv):
+    """2족 보행 전용 환경 - 관찰 공간 호환성 개선"""
+
+    def __init__(self, **kwargs):
+        # 허용되지 않는 파라미터들 제거
+        filtered_kwargs = {}
+        allowed_params = {
+            'randomize_physics', 'render_mode', 'frame_skip', 
+            'observation_space', 'default_camera_config', 'use_base_observation'
+        }
+        
+        for key, value in kwargs.items():
+            if key in allowed_params:
+                filtered_kwargs[key] = value
+        
+        # ✅ 호환성 모드 설정
+        self._use_base_observation = kwargs.get('use_base_observation', False)
+        
+        # 부모 클래스 초기화 (필터링된 kwargs 사용)
+        super().__init__(**filtered_kwargs)
+        
+        # 2족 보행용 보상 함수 사용
+        self.bipedal_reward = BipedWalkingReward()
+        self.episode_length = 0
+        self.max_episode_length = 1000
+
+        # 2족 보행을 위한 건강 상태 조건
+        self._healthy_z_range = (0.25, 0.60)  # 2족 보행 높이 범위
+        self._healthy_pitch_range = (-np.deg2rad(30), np.deg2rad(30))  # 더 관대한 기울기
+        self._healthy_roll_range = (-np.deg2rad(30), np.deg2rad(30))
+
+        # Domain randomization 설정
+        self.randomize_physics = kwargs.get('randomize_physics', True)
+        self.original_gravity = None
+
+        print(f"🤖 2족 보행 환경 - 관찰 모드: {'기본(45차원)' if self._use_base_observation else '확장(56차원)'}")
+
+    def reset(self, seed=None, options=None):
+        """환경 리셋 - 2족 보행 준비 자세에서 시작"""
+        obs, info = super().reset(seed=seed, options=options)
+
+        if self.original_gravity is None:
+            self.original_gravity = self.model.opt.gravity.copy()
+
+        # 2족 보행 준비 자세로 설정
+        self._set_bipedal_ready_pose()
+
+        if self.randomize_physics and self.original_gravity is not None:
+            self._apply_domain_randomization()
+
+        self.episode_length = 0
+
+        return self._get_obs(), info
+
+    def step(self, action):
+        """환경 스텝 실행"""
+        self.do_simulation(action, self.frame_skip)
+
+        obs = self._get_obs()
+
+        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data)
+
+        terminated = self._is_terminated()
+        truncated = self.episode_length >= self.max_episode_length
+
+        self.episode_length += 1
+
+        if hasattr(self, 'total_timesteps'):
+            self.total_timesteps += 1
+        else:
+            self.total_timesteps = 1
+
+        info = {
+            'episode_length': self.episode_length,
+            'bipedal_reward': reward,
+            'bipedal_success': self._is_bipedal_success(),
+            **reward_info
+        }
+
+        return obs, reward, terminated, truncated, info
+
     def _is_bipedal_success(self):
         """2족 보행 성공 판정"""
         
@@ -689,256 +892,6 @@ class Go1StandingEnv(Go1MujocoEnv):
         
         return (height_ok and front_feet_up and rear_feet_only and 
                 stable and duration_ok)
-
-    def _is_foot_contact(self, foot_name):
-        """발 접촉 상태 확인"""
-        try:
-            foot_geom_id = self.model.geom(foot_name).id
-            for i in range(self.data.ncon):
-                contact_geom1 = self.data.contact[i].geom1
-                contact_geom2 = self.data.contact[i].geom2
-                if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
-                    contact_force = np.linalg.norm(self.data.contact[i].force)
-                    if contact_force > 0.1:
-                        return True
-            return False
-        except:
-            return False
-
-    def _is_standing_successful(self):
-        """4족 서있기 성공 판정 (기존 메서드 유지)"""
-        trunk_height = self.data.qpos[2]
-        trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-
-        # 발 접촉 확인
-        foot_contacts = self.standing_reward._get_foot_contacts(self.model, self.data)
-
-        # 성공 조건
-        height_ok = 0.25 < trunk_height < 0.38       # 적절한 높이
-        upright_ok = up_vector[2] > 0.85             # 충분히 직립
-        all_feet_contact = sum(foot_contacts) >= 3.5 # 거의 모든 발이 접촉
-        
-        # 안정성 조건
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        linear_vel = np.linalg.norm(self.data.qvel[:3])
-        stable = angular_vel < 1.0 and linear_vel < 0.5
-
-        # 지속 시간 조건
-        duration_ok = self.episode_length > 100  # 최소 100 스텝 유지
-
-        return (height_ok and upright_ok and all_feet_contact and 
-                stable and duration_ok)
-
-    def _get_bipedal_obs(self):
-        """2족 보행용 관찰 상태"""
-        # 기본 정보
-        position = self.data.qpos[7:].flatten()
-        velocity = self.data.qvel.flatten()
-        
-        # 2족 보행 특화 정보 추가
-        # 1. 발 높이 정보
-        foot_heights = np.array([
-            self._get_foot_height('FR'),
-            self._get_foot_height('FL'),
-            self._get_foot_height('RR'),
-            self._get_foot_height('RL')
-        ])
-        
-        # 2. 무게중심 위치
-        com_position = self._get_com_position_relative_to_feet()
-        
-        # 3. 발 접촉 정보
-        foot_contacts = self.feet_contact_forces > 0.1
-        
-        # 4. 상체 기울기
-        trunk_quat = self.data.qpos[3:7]
-        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
-        
-        # 5. 목표 자세 (2족 서기)
-        target_pose = np.array([0.0, 0.0])  # 목표: 제자리 2족
-        
-        curr_obs = np.concatenate([
-            position,
-            velocity[:6] * 0.1,  # 스케일 조정
-            velocity[6:],
-            foot_heights,
-            com_position,
-            foot_contacts.astype(float),
-            [pitch, roll],
-            target_pose,
-            self._last_action
-        ])
-        
-        return curr_obs.clip(-self._clip_obs_threshold, self._clip_obs_threshold)
-
-    def _get_foot_height(self, foot_name):
-        """발 높이 계산"""
-        try:
-            foot_site_id = self.model.site(foot_name).id
-            foot_pos = self.data.site_xpos[foot_site_id]
-            return foot_pos[2]  # z 좌표
-        except:
-            return 0.0
-
-    def _get_com_position_relative_to_feet(self):
-        """무게중심의 발 기준 상대 위치"""
-        try:
-            # 무게중심 위치
-            com_pos = self.data.xpos[1][:2]  # x, y만
-            
-            # 뒷발 중심점
-            rr_pos = self.data.site_xpos[self.model.site("RR").id][:2]
-            rl_pos = self.data.site_xpos[self.model.site("RL").id][:2]
-            rear_center = (rr_pos + rl_pos) / 2
-            
-            # 무게중심이 뒷발 중심에서 얼마나 떨어져 있는지
-            relative_pos = com_pos - rear_center
-            return relative_pos
-        except:
-            return np.array([0.0, 0.0])
-
-    def _quat_to_euler(self, quat):
-        """Quaternion을 Euler angles로 변환"""
-        w, x, y, z = quat
-        
-        # Roll (x-axis rotation)
-        sinr_cosp = 2 * (w * x + y * z)
-        cosr_cosp = 1 - 2 * (x * x + y * y)
-        roll = np.arctan2(sinr_cosp, cosr_cosp)
-        
-        # Pitch (y-axis rotation)
-        sinp = 2 * (w * y - z * x)
-        if abs(sinp) >= 1:
-            pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
-        else:
-            pitch = np.arcsin(sinp)
-        
-        # Yaw (z-axis rotation)
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        yaw = np.arctan2(siny_cosp, cosy_cosp)
-        
-        return np.array([roll, pitch, yaw])
-
-
-class BipedalWalkingEnv(Go1StandingEnv):
-    """2족 보행 전용 환경"""
-
-    def __init__(self, **kwargs):
-        # 허용되지 않는 파라미터들 제거
-        filtered_kwargs = {}
-        allowed_params = {
-            'randomize_physics', 'render_mode', 'frame_skip', 
-            'observation_space', 'default_camera_config'
-        }
-        
-        for key, value in kwargs.items():
-            if key in allowed_params:
-                filtered_kwargs[key] = value
-            else:
-                pass
-        
-        # 부모 클래스 초기화 (필터링된 kwargs 사용)
-        super().__init__(**filtered_kwargs)
-        
-        # 2족 보행용 보상 함수 사용
-        self.bipedal_reward = BipedWalkingReward()
-        self.episode_length = 0
-        self.max_episode_length = 1000
-
-        # 2족 보행을 위한 건강 상태 조건
-        self._healthy_z_range = (0.25, 0.60)  # 2족 보행 높이 범위
-        self._healthy_pitch_range = (-np.deg2rad(30), np.deg2rad(30))  # 더 관대한 기울기
-        self._healthy_roll_range = (-np.deg2rad(30), np.deg2rad(30))
-
-        # Domain randomization 설정
-        self.randomize_physics = kwargs.get('randomize_physics', True)
-        self.original_gravity = None
-
-        #print("🐕 2족 보행 환경 초기화 완료")
-
-    def reset(self, seed=None, options=None):
-        """환경 리셋 - 2족 보행 준비 자세에서 시작"""
-        obs, info = super().reset(seed=seed, options=options)
-
-        if self.original_gravity is None:
-            self.original_gravity = self.model.opt.gravity.copy()
-
-        # ✅ 2족 보행 준비 자세로 설정
-        self._set_bipedal_ready_pose()
-
-        if self.randomize_physics and self.original_gravity is not None:
-            self._apply_domain_randomization()
-
-        self.episode_length = 0
-
-        return self._get_bipedal_obs(), info
-
-    def step(self, action):
-        """환경 스텝 실행"""
-        self.do_simulation(action, self.frame_skip)
-
-        obs = self._get_bipedal_obs()
-
-        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data)
-
-        terminated = self._is_terminated()
-        truncated = self.episode_length >= self.max_episode_length
-
-        self.episode_length += 1
-
-        if hasattr(self, 'total_timesteps'):
-            self.total_timesteps += 1
-        else:
-            self.total_timesteps = 1
-
-        info = {
-            'episode_length': self.episode_length,
-            'bipedal_reward': reward,
-            'bipedal_success': self._is_bipedal_success(),
-            **reward_info
-        }
-
-        return obs, reward, terminated, truncated, info
-
-    def _is_terminated(self):
-        """2족 보행용 종료 조건"""
-        
-        # 1. 높이 체크 - 범위 확대
-        if self.data.qpos[2] < 0.15 or self.data.qpos[2] > 0.6:
-            return True
-        
-        # 2. 기울기 체크 - 더 관대하게
-        trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = self.bipedal_reward._quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-        
-        # 2족은 더 많은 기울기 허용
-        if up_vector[2] < 0.5:  # 60도까지 허용
-            return True
-        
-        # 3. 속도 체크 - 더 관대하게
-        linear_vel = np.linalg.norm(self.data.qvel[:3])
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        
-        # 2족 전환 시 더 많은 움직임 허용
-        if linear_vel > 3.0 or angular_vel > 8.0:
-            return True
-        
-        # 4. 안정성 체크 - 연속 불안정만 체크
-        if not hasattr(self, '_instability_count'):
-            self._instability_count = 0
-            
-        if self._is_unstable():
-            self._instability_count += 1
-            if self._instability_count > 50:  # 0.5초 이상 불안정
-                return True
-        else:
-            self._instability_count = 0
-        
-        return False
 
 
 class BipedalCurriculumEnv(BipedalWalkingEnv):
@@ -994,7 +947,7 @@ class GradualStandingEnv(Go1StandingEnv):
         filtered_kwargs = {}
         allowed_params = {
             'randomize_physics', 'render_mode', 'frame_skip', 
-            'observation_space', 'default_camera_config'
+            'observation_space', 'default_camera_config', 'use_base_observation'
         }
         
         for key, value in kwargs.items():
@@ -1037,3 +990,38 @@ class GradualStandingEnv(Go1StandingEnv):
             print(f"🎓 커리큘럼 진행: Stage {self.curriculum_stage}")
             return True
         return False
+
+
+# ✅ 환경 생성 헬퍼 함수
+def create_compatible_env(env_class, pretrained_model_path=None, **env_kwargs):
+    """사전훈련 모델과 호환되는 환경 생성"""
+    
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        try:
+            from stable_baselines3 import PPO
+            
+            # 모델의 관찰 공간 확인
+            temp_model = PPO.load(pretrained_model_path, env=None)
+            
+            if hasattr(temp_model.policy, 'observation_space'):
+                model_obs_shape = temp_model.policy.observation_space.shape
+            else:
+                # 정책 네트워크 크기로 추정
+                first_layer = next(temp_model.policy.features_extractor.parameters())
+                model_obs_shape = (first_layer.shape[1],)
+            
+            del temp_model  # 메모리 정리
+            
+            # 모델이 45차원을 기대하면 호환 모드 사용
+            if model_obs_shape[0] == 45:
+                env_kwargs['use_base_observation'] = True
+                print(f"🔄 호환 모드: 기본 관찰 공간(45차원) 사용")
+            else:
+                env_kwargs['use_base_observation'] = False
+                print(f"🔄 확장 모드: 2족 보행 관찰 공간({model_obs_shape[0]}차원) 사용")
+                
+        except Exception as e:
+            print(f"⚠️ 모델 분석 실패: {e}, 기본 설정 사용")
+            env_kwargs['use_base_observation'] = False
+    
+    return env_class(**env_kwargs)
