@@ -5,8 +5,8 @@ models/
 .venv/
 recordings/
 eval_videos/
-eval_videos_standing/
-
+eval_videos_*/
+training_reports_*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -437,7 +437,7 @@ class Go1StandingEnv(Go1MujocoEnv):
                 shape=self._get_extended_obs().shape, 
                 dtype=np.float64
             )
-            print(f"🔄 확장 모드: 2족 보행 관찰 공간({self._get_extended_obs().shape[0]}차원) 사용")
+            #print(f"🔄 확장 모드: 2족 보행 관찰 공간({self._get_extended_obs().shape[0]}차원) 사용")
 
     def _get_base_obs(self):
         """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
@@ -879,7 +879,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         self.randomize_physics = kwargs.get('randomize_physics', True)
         self.original_gravity = None
 
-        print(f"🤖 2족 보행 환경 - 관찰 모드: {'기본(45차원)' if self._use_base_observation else '확장(56차원)'}")
+        #print(f"🤖 2족 보행 환경 - 관찰 모드: {'기본(45차원)' if self._use_base_observation else '확장(56차원)'}")
 
     def reset(self, seed=None, options=None):
         """환경 리셋 - 2족 보행 준비 자세에서 시작"""
@@ -1085,7 +1085,7 @@ def create_compatible_env(env_class, pretrained_model_path=None, **env_kwargs):
                 print(f"🔄 호환 모드: 기본 관찰 공간(45차원) 사용")
             else:
                 env_kwargs['use_base_observation'] = False
-                print(f"🔄 확장 모드: 2족 보행 관찰 공간({model_obs_shape[0]}차원) 사용")
+                #print(f"🔄 확장 모드: 2족 보행 관찰 공간({model_obs_shape[0]}차원) 사용")
                 
         except Exception as e:
             print(f"⚠️ 모델 분석 실패: {e}, 기본 설정 사용")
