@@ -171,10 +171,10 @@ class BipedWalkingReward:
             'lateral_stability': 6.0,      # 좌우 안정성
             'angular_stability': 5.0,      # 각속도 안정성
             
-            # 동작 관련
-            'torso_upright': 8.0,          # 상체 직립
+            # 동작 관련 - 수직 자세 강조
+            'torso_upright': 12.0,         # 상체 직립 (가중치 증가)
             'smooth_motion': 3.0,          # 부드러운 동작
-            'forward_lean': 4.0,           # 적절한 전방 기울기
+            'forward_lean': 0.0,           # 전방 기울기 제거 (수직 목표)
             
             # 페널티
             'energy': -0.02,               # 에너지 효율
@@ -260,17 +260,27 @@ class BipedWalkingReward:
         total_reward += self.weights['com_over_support'] * com_score
         reward_info['com_over_support'] = com_score
         
-        # 5. 상체 직립 보상
+        # 5. 상체 직립 보상 - 수정됨: 완전히 수직을 목표로
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
         up_vector = trunk_rotation_matrix[:, 2]
         
-        # 약간의 전방 기울기 허용 (5-15도)
-        ideal_pitch = np.deg2rad(10)  # 10도 전방 기울기
+        # 수직 자세를 목표로 (0도, 허용 오차 ±5도)
         current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
-        pitch_error = abs(current_pitch - ideal_pitch)
         
-        torso_reward = np.exp(-5 * pitch_error) * max(0, up_vector[2])
+        # pitch가 0에 가까울수록 높은 보상
+        pitch_penalty = abs(current_pitch)
+        
+        # up_vector[2]가 1에 가까울수록 (완전히 수직일수록) 높은 보상
+        verticality_reward = up_vector[2] ** 3  # 3제곱으로 더 강한 수직 유도
+        
+        # 두 가지 요소 결합: 수직도 + pitch 각도
+        torso_reward = verticality_reward * np.exp(-10 * pitch_penalty)
+        
+        # 추가 보너스: 거의 수직일 때 (±3도 이내)
+        if abs(current_pitch) < np.deg2rad(3):
+            torso_reward *= 1.5
+        
         total_reward += self.weights['torso_upright'] * torso_reward
         reward_info['torso_upright'] = torso_reward
         
@@ -286,8 +296,9 @@ class BipedWalkingReward:
         total_reward += self.weights['energy'] * energy_penalty
         reward_info['energy'] = -energy_penalty
         
-        # 8. 단계별 보너스
-        stage_bonus = self._compute_stage_bonus(front_feet_height, rear_feet_contact, trunk_height)
+        # 8. 단계별 보너스 - 수정됨: 수직 자세 추가 고려
+        stage_bonus = self._compute_stage_bonus(front_feet_height, rear_feet_contact, 
+                                               trunk_height, current_pitch)
         total_reward += stage_bonus
         reward_info['stage_bonus'] = stage_bonus
         
@@ -356,8 +367,8 @@ class BipedWalkingReward:
         # 거리가 가까울수록 높은 보상
         return np.exp(-5 * distance)
 
-    def _compute_stage_bonus(self, front_feet_height, rear_feet_contact, trunk_height):
-        """단계별 보너스 계산"""
+    def _compute_stage_bonus(self, front_feet_height, rear_feet_contact, trunk_height, current_pitch):
+        """단계별 보너스 계산 - 수직 자세 추가 고려"""
         stage_bonus = 0.0
         
         # 준비 단계: 높이 유지
@@ -372,11 +383,18 @@ class BipedWalkingReward:
         if np.mean(rear_feet_contact) > 0.8:
             stage_bonus += 2.0
         
-        # 2족 서기 단계: 모든 조건 만족
+        # 수직 자세 보너스 (새로 추가)
+        if abs(current_pitch) < np.deg2rad(10):  # 10도 이내
+            stage_bonus += 3.0
+        if abs(current_pitch) < np.deg2rad(5):   # 5도 이내
+            stage_bonus += 5.0
+        
+        # 2족 서기 단계: 모든 조건 만족 (수직 조건 추가)
         if (trunk_height > 0.4 and 
             np.mean(front_feet_height) > 0.05 and 
-            np.mean(rear_feet_contact) > 0.9):
-            stage_bonus += 5.0
+            np.mean(rear_feet_contact) > 0.9 and
+            abs(current_pitch) < np.deg2rad(5)):  # 5도 이내 수직
+            stage_bonus += 10.0  # 보너스 증가
         
         return stage_bonus
 
@@ -563,17 +581,28 @@ class Go1StandingEnv(Go1MujocoEnv):
         height_noise = noise_scale * 0.12
         self.data.qpos[2] = height_base + np.random.uniform(-height_noise, height_noise)
 
-        # 2. 트렁크 자세 - 2족 준비를 위한 다양한 기울기
+        # 2. 트렁크 자세 - 수직 자세를 목표로 다양한 시도
         angle_noise = noise_scale * 0.5  # 2족은 더 다양한 각도 필요
         
-        # 기본 뒤로 기울기에 노이즈 추가
-        base_pitch = np.deg2rad(-5)  # 기본 5도 뒤로
-        pitch_angle = base_pitch + np.random.uniform(-angle_noise, angle_noise)
+        # 기본 수직 자세(0도)에서 시작, 노이즈 추가
+        base_pitch = 0.0  # 수직 자세 목표
+        
+        # 초기 훈련에서는 다양한 pitch 각도 시도
+        if noise_scale > 0.15:
+            # 때때로 극단적인 각도도 시도 (학습 다양성)
+            if np.random.random() < 0.3:
+                # 30% 확률로 더 큰 범위 시도
+                pitch_angle = np.random.uniform(-angle_noise * 1.5, angle_noise * 1.5)
+            else:
+                pitch_angle = base_pitch + np.random.uniform(-angle_noise, angle_noise)
+        else:
+            # 후반 훈련에서는 수직 근처만 시도
+            pitch_angle = base_pitch + np.random.uniform(-angle_noise, angle_noise)
+        
         roll_angle = np.random.uniform(-angle_noise*0.5, angle_noise*0.5)
         yaw_angle = np.random.uniform(-angle_noise*0.3, angle_noise*0.3)
         
         # 오일러 각을 쿼터니언으로 변환
-        
         r = Rotation.from_euler('xyz', [roll_angle, pitch_angle, yaw_angle])
         quat = r.as_quat()  # [x, y, z, w] 순서
         
@@ -587,18 +616,18 @@ class Go1StandingEnv(Go1MujocoEnv):
         quat_norm = np.linalg.norm(self.data.qpos[3:7])
         self.data.qpos[3:7] /= quat_norm
 
-        # 3. 2족 보행 준비 관절 각도 - 매우 다양한 초기 자세
+        # 3. 2족 보행 준비 관절 각도 - 수직 자세에 맞게 조정
         joint_noise_scale = noise_scale * 1.5  # 2족은 더 큰 노이즈 필요
         
-        # 기본 2족 준비 자세
+        # 기본 2족 준비 자세 - 수직 자세를 고려한 관절 각도
         base_joint_targets = np.array([
-            # 앞다리 (FR, FL) - 들기 준비
-            0.0, 0.3, -0.6,    # FR
-            0.0, 0.3, -0.6,    # FL
+            # 앞다리 (FR, FL) - 들기 준비, 몸이 수직일 때 적절한 각도
+            0.0, 0.5, -1.0,    # FR (무릎 더 굽히고, 발목 덜 굽히기)
+            0.0, 0.5, -1.0,    # FL
             
-            # 뒷다리 (RR, RL) - 지지 준비
-            0.0, 0.4, -0.8,    # RR
-            0.0, 0.4, -0.8     # RL
+            # 뒷다리 (RR, RL) - 지지 준비, 수직 자세 지탱
+            0.0, 0.6, -1.2,    # RR (더 안정적인 각도)
+            0.0, 0.6, -1.2     # RL
         ])
         
         # 각 관절에 큰 노이즈 추가
@@ -613,12 +642,12 @@ class Go1StandingEnv(Go1MujocoEnv):
                 joint_noise[4] += np.random.uniform(-0.8, -0.3)  # FL 무릎 더 굽히기
                 joint_noise[5] += np.random.uniform(0.3, 0.8)    # FL 발목 더 들기
             
-            # 뒷다리 더 굽히기/펴기
+            # 뒷다리 더 굽히기/펴기 - 수직 자세 유지를 위해
             if np.random.random() < 0.4:  # 40% 확률
-                joint_noise[7] += np.random.uniform(-0.6, 0.6)   # RR 무릎
-                joint_noise[8] += np.random.uniform(-0.6, 0.6)   # RR 발목
-                joint_noise[10] += np.random.uniform(-0.6, 0.6)  # RL 무릎
-                joint_noise[11] += np.random.uniform(-0.6, 0.6)  # RL 발목
+                joint_noise[7] += np.random.uniform(-0.4, 0.4)   # RR 무릎
+                joint_noise[8] += np.random.uniform(-0.4, 0.4)   # RR 발목
+                joint_noise[10] += np.random.uniform(-0.4, 0.4)  # RL 무릎
+                joint_noise[11] += np.random.uniform(-0.4, 0.4)  # RL 발목
         
         # 최종 관절 각도
         joint_targets = base_joint_targets + joint_noise
