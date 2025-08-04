@@ -23,7 +23,7 @@ from visual_training_callback import VisualTrainingCallback, VideoRecordingCallb
 import torch
 import glob
 try:
-    from go1_standing_env import Go1StandingEnv, GradualStandingEnv
+    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv
 except ImportError:
     print("⚠️ go1_standing_env.py 파일이 필요합니다!")
     raise
