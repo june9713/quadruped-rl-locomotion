@@ -188,6 +188,34 @@ class BipedWalkingReward:
         }
         self.current_stage = 'prepare'
 
+    def _get_foot_contacts(self, model, data):
+            """발 접촉 감지 - StandingReward와 동일한 메서드"""
+            foot_names = ["FR", "FL", "RR", "RL"]
+            contacts = []
+
+            for foot_name in foot_names:
+                try:
+                    foot_geom_id = model.geom(foot_name).id
+                    contact = False
+
+                    for i in range(data.ncon):
+                        contact_geom1 = data.contact[i].geom1
+                        contact_geom2 = data.contact[i].geom2
+
+                        if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
+                            # 접촉력 확인
+                            contact_force = np.linalg.norm(data.contact[i].force)
+                            if contact_force > 0.1:  # 의미있는 접촉
+                                contact = True
+                                break
+
+                    contacts.append(1.0 if contact else 0.0)
+                except:
+                    contacts.append(0.0)
+
+            return contacts
+
+
     def compute_reward(self, model, data):
         """2족 보행 보상 계산"""
         total_reward = 0.0
