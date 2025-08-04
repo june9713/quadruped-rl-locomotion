@@ -48,7 +48,7 @@ class StandingReward:
         elif up_vector[2] > 0.8:  # 정상 방향이고 충분히 직립
             upright_reward = up_vector[2]
         else:
-            upright_reward = 0.0
+            upright_reward = -0.4
         total_reward += self.weights['upright'] * upright_reward
         reward_info['upright'] = upright_reward
 
@@ -390,7 +390,7 @@ class Go1StandingEnv(Go1MujocoEnv):
             return True
 
         # 높이 체크 (너무 낮거나 높으면 종료)
-        if self.data.qpos[2] < 0.20 or self.data.qpos[2] > 0.45:
+        if self.data.qpos[2] < 0.25:
             return True
 
         # 뒤집힌 상태 체크
@@ -398,7 +398,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
         up_vector = trunk_rotation_matrix[:, 2]
         
-        if up_vector[2] < 0.3:  # 너무 기울어짐
+        if up_vector[2] < 0.7:  # 너무 기울어짐
             return True
 
         # 너무 빠른 움직임 체크
