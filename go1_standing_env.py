@@ -160,39 +160,22 @@ class BipedWalkingReward:
     
     def __init__(self):
         self.weights = {
-            # 2족 보행 핵심 보상
-            'bipedal_posture': 15.0,      # 2족 자세 유지
-            'height': 10.0,                # 적절한 높이 (높게)
-            'front_feet_up': 12.0,         # 앞발 들기
-            'rear_feet_contact': 8.0,      # 뒷발만 접촉
-            
-            # 균형 관련
-            'com_over_support': 10.0,      # 무게중심이 뒷발 위에
-            'lateral_stability': 6.0,      # 좌우 안정성
-            'angular_stability': 5.0,      # 각속도 안정성
-            
-            # 동작 관련 - 수직 자세 강조
-            'torso_upright': 12.0,         # 상체 직립 (가중치 증가)
-            'smooth_motion': 3.0,          # 부드러운 동작
-            'forward_lean': 0.0,           # 전방 기울기 제거 (수직 목표)
-            
-            # 페널티
-            'energy': -0.02,               # 에너지 효율
-            'joint_limit': -2.0,           # 관절 한계
-            'excessive_motion': -3.0,      # 과도한 움직임
-            
-            # ✅ [수정] 머리를 숙이는 잘못된 자세에 대한 강력한 페널티 추가
-            'pitch_down_penalty': -20.0
+            # --- 핵심 성공 요소 (Key Success Factors) ---
+            'torso_upright': 15.0,         # ✅ [핵심] 상체 직립 유지 (가장 중요)
+            'height': 8.0,                 # ✅ [핵심] 목표 높이 유지 (2족 보행 기준)
+            'com_over_support': 12.0,      # ✅ [핵심] 무게중심을 두 발 위에 유지 (안정성)
+            'front_feet_up': 10.0,         # ✅ [핵심] 앞발을 공중에 유지
+
+            # --- 안정화 및 페널티 (Stabilization & Penalties) ---
+            'angular_vel_penalty': -0.05,  # ❌ 상체의 과도한 회전 속도 페널티
+            'horizontal_vel_penalty': -0.04,# ❌ 불필요한 수평 이동 페널티
+            'action_rate_penalty': -0.01,  # ❌ 급격한 액션 변화 페널티 (부드러운 제어)
+            'energy_penalty': -0.005,      # ❌ 에너지 효율 (토크 최소화)
+            'joint_limit_penalty': -2.0,   # ❌ 관절 한계 초과 페널티
+            'foot_scuff_penalty': -3.0     # ❌ 앞발을 바닥에 끄는 행위 페널티
         }
-        
-        # 2족 보행 단계별 목표
-        self.bipedal_stages = {
-            'prepare': 0,      # 준비 자세
-            'lifting': 1,      # 앞발 들기
-            'balancing': 2,    # 균형 잡기
-            'standing': 3      # 2족 서기
-        }
-        self.current_stage = 'prepare'
+        # 이전 액션 저장을 위한 변수
+        self._last_action = None
 
     def _get_foot_contacts(self, model, data):
             """발 접촉 감지 - StandingReward와 동일한 메서드"""
@@ -222,112 +205,126 @@ class BipedWalkingReward:
             return contacts
 
 
-    def compute_reward(self, model, data):
-        """2족 보행 보상 계산"""
+    def compute_reward(self, model, data, action):
+        """2족 보행 보상 계산 (리서치 기반 재설계)"""
         total_reward = 0.0
         reward_info = {}
-        
-        # ✅ [수정] 보상 계산에 필요한 주요 변수들을 함수 상단에서 미리 계산
+
+        # --- 1. 주요 물리량 사전 계산 ---
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-        current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
+        up_vector = trunk_rotation_matrix[:, 2] # 로봇의 Z축 벡터 (up-vector)
         
-        front_feet_height = self._get_front_feet_height(model, data)
-        rear_feet_contact = self._get_rear_feet_contact(model, data)
         trunk_height = data.qpos[2]
-        
-        # ✅ [수정] 1. 머리를 숙이는 자세(심한 positive pitch)에 대해 강력한 페널티 부과
-        # 머리가 15도 이상 숙여지면 페널티를 주기 시작
-        pitch_down_threshold = np.deg2rad(15)
-        if current_pitch > pitch_down_threshold:
-            pitch_penalty_amount = (current_pitch - pitch_down_threshold) ** 2
-            pitch_down_reward = self.weights['pitch_down_penalty'] * pitch_penalty_amount
-            total_reward += pitch_down_reward
-            reward_info['pitch_down_penalty'] = pitch_down_reward
-        else:
-            reward_info['pitch_down_penalty'] = 0.0
-            
-        # ✅ [수정] 2. '올바른 자세'일 때만 다른 보상들을 받을 수 있도록 조건 강화
-        # 몸통이 심하게 숙여지지 않았을 때를 '유효한 자세'로 간주
-        is_valid_posture = current_pitch < np.deg2rad(30)
-        
-        # 3. 2족 자세 보상 (앞발 들고, 뒷발 닿기)
-        if is_valid_posture:
-            bipedal_score = np.mean(front_feet_height) * np.mean(rear_feet_contact)
-            total_reward += self.weights['bipedal_posture'] * bipedal_score
-            reward_info['bipedal_posture'] = bipedal_score
-        else:
-            reward_info['bipedal_posture'] = 0.0
-
-        # 4. 높이 보상 (2족은 더 높아야 함)
-        if is_valid_posture:
-            target_height = 0.45  # 2족 목표 높이
-            height_error = abs(trunk_height - target_height)
-            height_reward = np.exp(-10 * height_error) if trunk_height > 0.3 else 0
-            total_reward += self.weights['height'] * height_reward
-            reward_info['height'] = height_reward
-        else:
-            reward_info['height'] = 0.0
-        
-        # 5. 앞발 들기 보상
-        if is_valid_posture:
-            min_lift_height = 0.05
-            front_feet_up_reward = 0
-            for height in front_feet_height:
-                if height > min_lift_height:
-                    front_feet_up_reward += np.tanh(height / 0.1)
-            front_feet_up_reward /= 2
-            total_reward += self.weights['front_feet_up'] * front_feet_up_reward
-            reward_info['front_feet_up'] = front_feet_up_reward
-        else:
-            reward_info['front_feet_up'] = 0.0
-            
-        # 6. 무게중심이 뒷발 위에 있는지
         com_position = self._get_com_position(model, data)
+        
+        front_feet_heights = self._get_front_feet_heights(model, data)
         rear_feet_positions = self._get_rear_feet_positions(model, data)
-        com_score = self._compute_com_over_support(com_position, rear_feet_positions)
-        total_reward += self.weights['com_over_support'] * com_score
-        reward_info['com_over_support'] = com_score
+
+        # --- 2. 핵심 보상 (Positive Rewards) ---
+
+        # [보상 1] 상체 직립 (Torso Upright)
+        # 로봇의 Z축(up_vector)이 월드 Z축(0,0,1)과 얼마나 가까운지를 측정합니다.
+        # up_vector[2]가 1에 가까울수록 직립 상태입니다.
+        upright_reward = up_vector[2]
+        total_reward += self.weights['torso_upright'] * upright_reward
+        reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
+
+        # [보상 2] 목표 높이 유지 (Height)
+        target_height = 0.48  # 2족 보행 목표 높이 (기존보다 약간 높게 설정)
+        height_error = abs(trunk_height - target_height)
+        height_reward = np.exp(-15 * height_error) # 오차에 민감하게 반응하도록 가중치 증가
+        total_reward += self.weights['height'] * height_reward
+        reward_info['reward_height'] = height_reward * self.weights['height']
+
+        # [보상 3] 무게중심 안정성 (CoM over Support Polygon)
+        # 두 뒷발의 중심점을 지지 영역의 중심으로 간주하고, 무게중심이 이 위에 있도록 유도합니다.
+        support_center = np.mean(rear_feet_positions, axis=0)
+        com_xy = com_position[:2]
+        com_error = np.linalg.norm(com_xy - support_center)
+        com_reward = np.exp(-20 * com_error) # 무게중심 오차에 매우 민감하게 반응
+        total_reward += self.weights['com_over_support'] * com_reward
+        reward_info['reward_com_support'] = com_reward * self.weights['com_over_support']
         
-        # 7. 상체 직립 보상 (기존 로직 유지)
-        pitch_penalty = abs(current_pitch)
-        verticality_reward = up_vector[2] ** 3
-        torso_reward = verticality_reward * np.exp(-10 * pitch_penalty)
-        if abs(current_pitch) < np.deg2rad(3):
-            torso_reward *= 1.5
-        total_reward += self.weights['torso_upright'] * torso_reward
-        reward_info['torso_upright'] = torso_reward
+        # [보상 4] 앞발 들기 (Front Feet Up)
+        # 앞발이 바닥에서 충분히 떨어져 있도록 보상합니다.
+        avg_front_feet_height = np.mean(front_feet_heights)
+        # 부드러운 보상을 위해 tanh 함수 사용, 목표 높이 0.15m
+        front_feet_reward = np.tanh(avg_front_feet_height / 0.15)
+        total_reward += self.weights['front_feet_up'] * front_feet_reward
+        reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
+
+        # --- 3. 페널티 (Negative Rewards) ---
+
+        # [페널티 1] 과도한 상체 회전 속도 (Angular Velocity)
+        angular_vel_penalty = np.sum(np.square(data.qvel[3:6])) # Roll, Pitch, Yaw 속도
+        total_reward += self.weights['angular_vel_penalty'] * angular_vel_penalty
+        reward_info['penalty_angular_vel'] = self.weights['angular_vel_penalty'] * angular_vel_penalty
         
-        # 8. 안정성 보상
-        angular_vel = data.qvel[3:6]
-        angular_stability = np.exp(-2 * np.linalg.norm(angular_vel))
-        total_reward += self.weights['angular_stability'] * angular_stability
-        reward_info['angular_stability'] = angular_stability
+        # [페널티 2] 불필요한 수평 이동 (Horizontal Velocity)
+        horizontal_vel_penalty = np.sum(np.square(data.qvel[:2])) # X, Y 선속도
+        total_reward += self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
+        reward_info['penalty_horizontal_vel'] = self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
         
-        # 9. 에너지 페널티
-        motor_efforts = np.sum(np.square(data.ctrl))
-        energy_penalty = motor_efforts * 0.5
-        total_reward += self.weights['energy'] * energy_penalty
-        reward_info['energy'] = -energy_penalty
+        # [페널티 3] 액션 변화율 (Action Rate) - 부드러운 제어 유도
+        if self._last_action is not None:
+            action_rate_penalty = np.sum(np.square(action - self._last_action))
+            total_reward += self.weights['action_rate_penalty'] * action_rate_penalty
+            reward_info['penalty_action_rate'] = self.weights['action_rate_penalty'] * action_rate_penalty
+        self._last_action = action
+
+        # [페널티 4] 에너지 (Torque)
+        energy_penalty = np.sum(np.square(data.ctrl))
+        total_reward += self.weights['energy_penalty'] * energy_penalty
+        reward_info['penalty_energy'] = self.weights['energy_penalty'] * energy_penalty
+
+        # [페널티 5] 관절 한계 (Joint Limit)
+        joint_pos = data.qpos[7:]
+        joint_ranges = model.jnt_range[1:]
+        limit_penalty = 0.0
+        for i, pos in enumerate(joint_pos):
+            if pos < joint_ranges[i, 0] * 0.95: # 95% 범위 밖
+                limit_penalty += (joint_ranges[i, 0] - pos)**2
+            elif pos > joint_ranges[i, 1] * 0.95:
+                limit_penalty += (pos - joint_ranges[i, 1])**2
+        total_reward += self.weights['joint_limit_penalty'] * limit_penalty
+        reward_info['penalty_joint_limit'] = self.weights['joint_limit_penalty'] * limit_penalty
         
-        # 10. 단계별 보너스
-        stage_bonus = self._compute_stage_bonus(front_feet_height, rear_feet_contact, 
-                                               trunk_height, current_pitch)
-        total_reward += stage_bonus
-        reward_info['stage_bonus'] = stage_bonus
-        
+        # [페널티 6] 앞발 쓸림 (Foot Scuffing)
+        front_feet_h_vel = self._get_front_feet_horizontal_velocities(model, data)
+        # 앞발이 낮고(0.05m 이하) 수평 속도가 있을 때 페널티
+        scuff_penalty = np.sum(front_feet_h_vel * (np.array(front_feet_heights) < 0.05))
+        total_reward += self.weights['foot_scuff_penalty'] * scuff_penalty
+        reward_info['penalty_foot_scuff'] = self.weights['foot_scuff_penalty'] * scuff_penalty
+
+        # 최종 보상은 0 이상이 되도록 클리핑 (학습 안정성)
+        total_reward = max(0, total_reward)
+
         return total_reward, reward_info
 
-    def _get_front_feet_height(self, model, data):
-        """앞발 높이 계산"""
+    def _get_front_feet_horizontal_velocities(self, model, data):
+        """앞발들의 수평 속도 계산"""
+        h_vels = []
+        # geom 기반으로 속도를 얻기 위해 mj_objectVelocity 사용
+        for foot_name in ["FR", "FL"]:
+            try:
+                geom_id = model.geom(foot_name).id
+                vel = np.zeros(6)
+                mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_GEOM, geom_id, vel, 0)
+                h_vels.append(np.linalg.norm(vel[:2])) # x,y 선속도
+            except KeyError:
+                h_vels.append(0.0)
+        return np.array(h_vels)
+
+        
+    def _get_front_feet_heights(self, model, data):
+        """앞발들의 높이 계산"""
         front_feet_heights = []
         for foot_name in ["FR", "FL"]:
             try:
                 foot_site_id = model.site(foot_name).id
-                foot_pos = data.site_xpos[foot_site_id]
-                front_feet_heights.append(foot_pos[2])  # z 좌표
-            except:
+                front_feet_heights.append(data.site_xpos[foot_site_id][2])
+            except KeyError:
                 front_feet_heights.append(0.0)
         return front_feet_heights
 
@@ -597,155 +594,52 @@ class Go1StandingEnv(Go1MujocoEnv):
         return np.array([roll, pitch, yaw])
 
     def _set_bipedal_ready_pose(self):
-        """2족 보행 준비 자세 설정 - 적응적 노이즈 적용"""
+        """2족 보행 준비 자세 설정 - 안정화된 버전"""
+        # --- 1. 트렁크 위치 및 자세 초기화 ---
+        # x, y, yaw는 약간의 노이즈만 추가
+        self.data.qpos[0:2] = np.random.uniform(-0.05, 0.05, 2)
+        yaw_angle = np.random.uniform(-0.1, 0.1)
         
-        # 적응적 노이즈 스케일 계산
-        noise_scale = self._get_adaptive_noise_scale()
+        # 높이는 웅크린 자세에 맞게 고정 (0.3m)
+        self.data.qpos[2] = 0.3
         
-        # 1. 트렁크 위치 - 적응적 노이즈
-        position_noise = noise_scale * 0.15
-        self.data.qpos[0] = np.random.uniform(-position_noise, position_noise)  # x
-        self.data.qpos[1] = np.random.uniform(-position_noise, position_noise)  # y
+        # Roll, Pitch는 0에 가깝게 설정하여 안정적인 시작 유도
+        roll_angle = np.random.uniform(-0.05, 0.05)
+        pitch_angle = np.random.uniform(-0.05, 0.05)
         
-        # 높이 변동
-        height_base = 0.35
-        height_noise = noise_scale * 0.12
-        self.data.qpos[2] = height_base + np.random.uniform(-height_noise, height_noise)
-
-        # 2. 트렁크 자세 - 수직 자세를 목표로 다양한 시도
-        angle_noise = noise_scale * 0.5  # 2족은 더 다양한 각도 필요
-        
-        # 기본 수직 자세(0도)에서 시작, 노이즈 추가
-        base_pitch = 0.0  # 수직 자세 목표
-        
-        # 초기 훈련에서는 다양한 pitch 각도 시도
-        if noise_scale > 0.15:
-            # 때때로 극단적인 각도도 시도 (학습 다양성)
-            if np.random.random() < 0.3:
-                # 30% 확률로 더 큰 범위 시도
-                pitch_angle = np.random.uniform(-angle_noise * 1.5, angle_noise * 1.5)
-            else:
-                pitch_angle = base_pitch + np.random.uniform(-angle_noise, angle_noise)
-        else:
-            # 후반 훈련에서는 수직 근처만 시도
-            pitch_angle = base_pitch + np.random.uniform(-angle_noise, angle_noise)
-        
-        roll_angle = np.random.uniform(-angle_noise*0.5, angle_noise*0.5)
-        yaw_angle = np.random.uniform(-angle_noise*0.3, angle_noise*0.3)
-        
-        # 오일러 각을 쿼터니언으로 변환
         r = Rotation.from_euler('xyz', [roll_angle, pitch_angle, yaw_angle])
-        quat = r.as_quat()  # [x, y, z, w] 순서
-        
-        # MuJoCo는 [w, x, y, z] 순서 사용
-        self.data.qpos[3] = quat[3]  # w
-        self.data.qpos[4] = quat[0]  # x
-        self.data.qpos[5] = quat[1]  # y
-        self.data.qpos[6] = quat[2]  # z
+        quat = r.as_quat() # [x, y, z, w]
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]] # w, x, y, z
 
-        # 쿼터니언 정규화
-        quat_norm = np.linalg.norm(self.data.qpos[3:7])
-        self.data.qpos[3:7] /= quat_norm
-
-        # 3. 2족 보행 준비 관절 각도 - 매우 다양한 범위의 노이즈
-        joint_noise_scale = noise_scale * 1.5  # 2족은 더 큰 노이즈 필요
-        
-        # 기본 2족 준비 자세 - 수직 자세를 고려한 관절 각도
+        # --- 2. 관절 각도 초기화 ---
+        # 안정적으로 웅크린 자세의 기본 관절 각도
         base_joint_targets = np.array([
-            # 앞다리 (FR, FL) - 들기 준비
-            0.0, 0.5, -1.0,    # FR
-            0.0, 0.5, -1.0,    # FL
-            
-            # 뒷다리 (RR, RL) - 지지 준비
-            0.0, 0.6, -1.2,    # RR
-            0.0, 0.6, -1.2     # RL
+            # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
+            0.0, 0.8, -1.6,
+            0.0, 0.8, -1.6,
+            # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태
+            0.0, 0.8, -1.6,
+            0.0, 0.8, -1.6,
         ])
         
-        # 각 관절마다 매우 다른 범위의 노이즈 적용
-        joint_noise = np.zeros(12)
-        
-        for i in range(12):
-            # 관절 종류와 다리 위치에 따라 다른 노이즈 범위
-            if i < 6:  # 앞다리
-                if i % 3 == 0:  # Hip joints (0, 3)
-                    range_multiplier = np.random.uniform(0.3, 1.2)
-                elif i % 3 == 1:  # Knee joints (1, 4) - 앞다리 무릎은 큰 범위
-                    range_multiplier = np.random.uniform(1.0, 3.0)
-                else:  # Ankle joints (2, 5) - 앞다리 발목도 큰 범위
-                    range_multiplier = np.random.uniform(0.8, 2.5)
-            else:  # 뒷다리
-                if i % 3 == 0:  # Hip joints (6, 9)
-                    range_multiplier = np.random.uniform(0.4, 1.0)
-                elif i % 3 == 1:  # Knee joints (7, 10)
-                    range_multiplier = np.random.uniform(0.6, 1.8)
-                else:  # Ankle joints (8, 11)
-                    range_multiplier = np.random.uniform(0.5, 1.5)
-            
-            # 기본 노이즈
-            joint_noise[i] = np.random.uniform(-joint_noise_scale * range_multiplier, 
-                                             joint_noise_scale * range_multiplier)
-        
-        # 초기 훈련에서는 극단적인 자세도 시도
-        if noise_scale > 0.15:
-            # 앞다리를 아예 높이 들어올리는 시도
-            if np.random.random() < 0.3:  # 30% 확률
-                extreme_lift = np.random.uniform(2.0, 4.0)
-                joint_noise[1] += np.random.uniform(-1.2, -0.3) * extreme_lift  # FR 무릎 더 굽히기
-                joint_noise[2] += np.random.uniform(0.3, 1.2) * extreme_lift    # FR 발목 더 들기
-                joint_noise[4] += np.random.uniform(-1.2, -0.3) * extreme_lift  # FL 무릎 더 굽히기
-                joint_noise[5] += np.random.uniform(0.3, 1.2) * extreme_lift    # FL 발목 더 들기
-            
-            # 뒷다리 극단적 자세 - 수직 자세 유지를 위해
-            if np.random.random() < 0.4:  # 40% 확률
-                extreme_support = np.random.uniform(1.5, 3.0)
-                joint_noise[7] += np.random.uniform(-0.6, 0.6) * extreme_support   # RR 무릎
-                joint_noise[8] += np.random.uniform(-0.6, 0.6) * extreme_support   # RR 발목
-                joint_noise[10] += np.random.uniform(-0.6, 0.6) * extreme_support  # RL 무릎
-                joint_noise[11] += np.random.uniform(-0.6, 0.6) * extreme_support  # RL 발목
-            
-            # 비대칭 극단적 움직임
-            if np.random.random() < 0.25:  # 25% 확률
-                # 한쪽 앞다리만 극단적으로 들기
-                if np.random.random() < 0.5:
-                    joint_noise[0:3] += np.random.uniform(-0.5, 0.5) * 2.0  # FR 극단적
-                else:
-                    joint_noise[3:6] += np.random.uniform(-0.5, 0.5) * 2.0  # FL 극단적
-        
-        # 최종 관절 각도
+        # 모든 관절에 작은 노이즈 추가
+        joint_noise = np.random.uniform(-0.1, 0.1, 12)
         joint_targets = base_joint_targets + joint_noise
         
-        # 관절 한계 내로 클리핑 (2족은 한계에 더 가깝게)
+        # 관절 한계 내로 클리핑
         joint_ranges = self.model.jnt_range[1:]
-        for i in range(12):
-            joint_targets[i] = np.clip(joint_targets[i], 
-                                      joint_ranges[i, 0] * 0.95, 
-                                      joint_ranges[i, 1] * 0.95)
+        joint_targets = np.clip(joint_targets, joint_ranges[:, 0], joint_ranges[:, 1])
         
         self.data.qpos[7:19] = joint_targets
 
-        # 4. 속도 노이즈 - 2족은 더 다양한 속도
-        vel_noise_scale = noise_scale * 0.4
-        
-        for i in range(len(self.data.qvel)):
-            if i < 3:  # 선속도
-                vel_range = np.random.uniform(0.5, 2.0)
-            elif i < 6:  # 각속도 - 2족은 더 큰 각속도 변화
-                vel_range = np.random.uniform(0.8, 3.0)
-            else:  # 관절 속도
-                vel_range = np.random.uniform(0.5, 2.5)
-            
-            self.data.qvel[i] = np.random.normal(0, vel_noise_scale * vel_range)
-        
+        # --- 3. 속도 초기화 ---
+        # 모든 속도는 0으로 시작하여 안정성 확보
+        self.data.qvel[:] = 0.0
         self.data.qacc[:] = 0.0
-
-        # 5. 제어 입력 초기화
         self.data.ctrl[:] = 0.0
 
-        # 6. 물리 시뮬레이션 적용
-        mujoco.mj_forward(self.model, self.data)
-
-        # 7. 발이 지면에 접촉하도록 높이 자동 조정
-        self._auto_adjust_height_for_ground_contact()
+        # --- 4. 시뮬레이션 상태 업데이트 ---
+        mujoco.mj_forward(model=self.model, data=self.data)
 
     def _set_natural_standing_pose(self):
         """자연스러운 4족 서있기 자세 설정 - 적응적 노이즈 적용"""

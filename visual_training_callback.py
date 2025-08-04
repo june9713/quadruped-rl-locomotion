@@ -148,15 +148,15 @@ class VisualTrainingCallback(BaseCallback):
             print(f"    📈 보상: {episode_reward:.2f}, 길이: {episode_length}")
 
             # 영상 저장
-            if self.save_videos and frames:
-                os.makedirs("eval_videos", exist_ok=True)
-                filename = (f"eval_videos/eval_{self.eval_count}_ep{episode+1}_"
-                           f"t{self.num_timesteps}_{int(time.time())}.mp4")
-                try:
-                    imageio.mimsave(filename, frames, fps=30)
-                    print(f"    💾 비디오 저장: {filename}")
-                except Exception as e:
-                    print(f"    ❌ 비디오 저장 실패: {e}")
+            #if self.save_videos and frames:
+            #    os.makedirs("eval_videos", exist_ok=True)
+            #    filename = (f"eval_videos/eval_{self.eval_count}_ep{episode+1}_"
+            #               f"t{self.num_timesteps}_{int(time.time())}.mp4")
+            #    try:
+            #        imageio.mimsave(filename, frames, fps=30)
+            #        print(f"    💾 비디오 저장: {filename}")
+            #    except Exception as e:
+            #        print(f"    ❌ 비디오 저장 실패: {e}")
 
         # 결과 집계
         mean_r, std_r = np.mean(episode_rewards), np.std(episode_rewards)

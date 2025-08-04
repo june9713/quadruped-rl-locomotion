@@ -134,54 +134,48 @@ def check_observation_compatibility(pretrained_model_path, current_env):
 def create_optimized_ppo_model(env, args, tensorboard_log=None):
     """2족 보행 최적화된 PPO 모델 생성"""
     
-    # 2족 보행용 학습률 스케줄
+    # 2족 보행용 학습률 스케줄 - 점진적으로 학습률을 줄여 안정적인 수렴 유도
     def standing_lr_schedule(progress_remaining):
-        """2족 보행 최적화 학습률 스케줄"""
-        if progress_remaining > 0.9:
-            return args.learning_rate * 1.2
-        elif progress_remaining > 0.7:
-            return args.learning_rate
-        elif progress_remaining > 0.3:
-            return args.learning_rate * 0.5
+        # 초기에는 비교적 높은 학습률, 점차 감소
+        if progress_remaining > 0.8:
+            return 1e-4
+        elif progress_remaining > 0.5:
+            return 5e-5
         else:
-            return args.learning_rate * 0.2
-    
+            return 1e-5
+            
+    # 클립 범위도 점진적으로 줄여 학습 후반부의 안정성 확보
     def clip_range_schedule(progress_remaining):
-        """클립 범위 스케줄"""
-        return args.clip_range
-    
-    if args.use_curriculum:
-        lr_schedule = standing_lr_schedule
-        clip_range = clip_range_schedule
-    else:
-        lr_schedule = args.learning_rate
-        clip_range = clip_range_schedule
+        if progress_remaining > 0.5:
+            return 0.2
+        else:
+            return 0.1
+
+    lr_schedule = standing_lr_schedule
+    clip_range = clip_range_schedule
     
     # 2족 보행 최적화 PPO 하이퍼파라미터
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=lr_schedule,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=8,
-        gamma=0.995,
-        gae_lambda=0.98,
-        clip_range=clip_range,
-        clip_range_vf=0.2,
-        ent_coef=args.entropy_coef,
-        vf_coef=0.8,
-        max_grad_norm=0.3,
+        n_steps=4096,               # [수정] 더 많은 경험을 바탕으로 업데이트 (기존 1024)
+        batch_size=256,             # [수정] 배치 크기 증가
+        n_epochs=10,
+        gamma=0.99,                 # [수정] 감마 값 조정
+        gae_lambda=0.95,
+        clip_range=clip_range,      # [수정] 정책 업데이트 폭 제한 강화
+        ent_coef=0.001,             # [수정] 엔트로피 계수 감소
+        vf_coef=0.5,
+        max_grad_norm=0.5,
         use_sde=False,
-        sde_sample_freq=-1,
-        target_kl=0.015,
         tensorboard_log=tensorboard_log,
         verbose=1,
         policy_kwargs=dict(
-            net_arch=[dict(pi=[256, 256, 128], vf=[256, 256, 128])],
-            activation_fn=torch.nn.Tanh,
+            net_arch=[dict(pi=[512, 256], vf=[512, 256])], # [수정] 신경망 용량 증가
+            activation_fn=torch.nn.ReLU, # [수정] Tanh -> ReLU
             ortho_init=True,
-            log_std_init=-0.5,
+            log_std_init=-2.0 # [수정] 초기 탐험 강도 조절
         ),
         device='auto'
     )
