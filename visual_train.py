@@ -319,8 +319,8 @@ def train_with_optimized_parameters(args):
             env_class = GradualStandingEnv
             print("📚 점진적 커리큘럼 환경 사용")
         else:
-            env_class = Go1StandingEnv
-            print("🎯 직접 2족 보행 환경 사용")
+            env_class = BipedalWalkingEnv
+            print("🎯 2족 보행 환경 사용")
     else:
         env_class = Go1MujocoEnv
         print("🐕 기본 4족 보행 환경 사용")
