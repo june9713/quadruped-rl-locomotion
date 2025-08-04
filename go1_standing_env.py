@@ -639,7 +639,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         self.data.ctrl[:] = 0.0
 
         # --- 4. 시뮬레이션 상태 업데이트 ---
-        mujoco.mj_forward(model=self.model, data=self.data)
+        mujoco.mj_forward(self.model, self.data)
 
     def _set_natural_standing_pose(self):
         """자연스러운 4족 서있기 자세 설정 - 적응적 노이즈 적용"""
