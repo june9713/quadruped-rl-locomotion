@@ -877,36 +877,44 @@ class Go1StandingEnv(Go1MujocoEnv):
         return obs, reward, terminated, truncated, info
 
     def _is_terminated(self):
-        """2족 보행용 종료 조건"""
+        """2족 보행용 종료 조건 (사용자 정의 자세에 맞게 수정됨)"""
         
-        # 1. 높이 체크 - 범위 확대
-        if self.data.qpos[2] < 0.15 or self.data.qpos[2] > 0.6:
+        # 1. 높이 체크 - 허용 범위 확장
+        # ✅ [수정] 초기 높이 0.62를 허용하기 위해 상한선을 0.8로 늘립니다.
+        if self.data.qpos[2] < 0.15 or self.data.qpos[2] > 0.8:
             return True
         
-        # 2. 기울기 체크 - 더 관대하게
+        # 2. 기울기 체크 - 허용 범위 대폭 확장
         trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
+        # BipedalWalkingReward 클래스의 _quat_to_rotmat을 직접 호출하거나, 여기에 동일한 함수를 정의해야 합니다.
+        # BipedalWalkingEnv를 사용중이므로 self.bipedal_reward를 통해 접근합니다.
+        if hasattr(self, 'bipedal_reward'):
+            trunk_rotation_matrix = self.bipedal_reward._quat_to_rotmat(trunk_quat)
+        else: # 혹시 모를 경우를 대비
+            trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
+
         up_vector = trunk_rotation_matrix[:, 2]
         
-        # 2족은 더 많은 기울기 허용
-        if up_vector[2] < 0.5:  # 60도까지 허용
+        # ✅ [수정] 초기 기울기 -1.5 라디안(약 -86도)을 허용하기 위해
+        # up_vector[2]의 하한선을 -0.2로 크게 낮춥니다.
+        # up_vector[2]가 -0.2보다 작아지는 경우는 약 101도 이상 기울어졌을 때입니다.
+        if up_vector[2] < -0.2:
             return True
         
-        # 3. 속도 체크 - 더 관대하게
+        # 3. 속도 체크 - 기존 값 유지
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        # 2족 전환 시 더 많은 움직임 허용
         if linear_vel > 3.0 or angular_vel > 8.0:
             return True
         
-        # 4. 안정성 체크 - 연속 불안정만 체크
+        # 4. 안정성 체크 - 기존 값 유지
         if not hasattr(self, '_instability_count'):
             self._instability_count = 0
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 50:  # 0.5초 이상 불안정
+            if self._instability_count > 50:
                 return True
         else:
             self._instability_count = 0
