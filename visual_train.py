@@ -190,7 +190,7 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
 
 
 class StandingTrainingCallback(BaseCallback):
-    """2족 보행 특화 훈련 콜백"""
+    """2족 보행 특화 훈련 콜백 - 환경별 보상 객체 호환"""
     
     def __init__(self, args, eval_env, verbose=0):
         super().__init__(verbose)
@@ -208,6 +208,19 @@ class StandingTrainingCallback(BaseCallback):
         # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
         
+    def _get_reward_object(self, env):
+        """환경에서 적절한 보상 객체 찾기"""
+        if hasattr(env, 'bipedal_reward'):
+            return env.bipedal_reward
+        elif hasattr(env, 'standing_reward'):
+            return env.standing_reward
+        elif hasattr(env, 'env'):
+            if hasattr(env.env, 'bipedal_reward'):
+                return env.env.bipedal_reward
+            elif hasattr(env.env, 'standing_reward'):
+                return env.env.standing_reward
+        return None
+        
     def _on_step(self) -> bool:
         """매 스텝마다 호출"""
         # 체크포인트 저장
@@ -218,7 +231,7 @@ class StandingTrainingCallback(BaseCallback):
         return True
     
     def _on_rollout_end(self) -> bool:
-        """롤아웃 종료 시 물구나무서기 통계도 함께 출력"""
+        """롤아웃 종료 시 통계 출력"""
         
         # 기존 성능 평가 로직
         if len(self.locals.get('episode_rewards', [])) > 0:
@@ -234,7 +247,7 @@ class StandingTrainingCallback(BaseCallback):
             else:
                 self.no_improvement_steps += self.args.n_steps * self.args.num_envs
         
-        # 물구나무서기 통계 수집 및 출력
+        # 통계 수집 및 출력
         self._log_upside_down_statistics()
         
         # 조기 정지 확인
@@ -246,22 +259,18 @@ class StandingTrainingCallback(BaseCallback):
         return True
 
     def _log_upside_down_statistics(self):
-        """물구나무서기 통계 로깅"""
+        """통계 로깅 - 환경별 보상 객체 호환"""
         try:
-            # 환경에서 물구나무서기 카운트 수집
+            # 환경에서 카운트 수집
             upside_down_counts = []
             
             # 모든 병렬 환경에서 통계 수집
             if hasattr(self.training_env, 'envs'):
                 for env in self.training_env.envs:
                     try:
-                        # 환경의 standing_reward에서 카운트 가져오기
-                        if hasattr(env, 'standing_reward'):
-                            count = getattr(env.standing_reward, 'upside_down_count', 0)
-                            upside_down_counts.append(count)
-                        elif hasattr(env, 'env') and hasattr(env.env, 'standing_reward'):
-                            # Wrapper가 있는 경우
-                            count = getattr(env.env.standing_reward, 'upside_down_count', 0)
+                        reward_obj = self._get_reward_object(env)
+                        if reward_obj:
+                            count = getattr(reward_obj, 'upside_down_count', 0)
                             upside_down_counts.append(count)
                     except:
                         pass
@@ -287,7 +296,7 @@ class StandingTrainingCallback(BaseCallback):
                 self.last_upside_down_count = total_upside_down
                 
         except Exception as e:
-            print(f"⚠️ 물구나무서기 통계 수집 실패: {e}")
+            print(f"⚠️ 통계 수집 실패: {e}")
     
     def _save_checkpoint(self):
         """체크포인트 저장"""
@@ -297,9 +306,10 @@ class StandingTrainingCallback(BaseCallback):
         checkpoint_path = checkpoint_dir / f"checkpoint_{self.num_timesteps}.zip"
         self.model.save(checkpoint_path)
         
-        # 물구나무서기 통계도 메타데이터에 포함
+        # 통계도 메타데이터에 포함
         try:
-            upside_down_count = getattr(self.eval_env.standing_reward, 'upside_down_count', 0)
+            reward_obj = self._get_reward_object(self.eval_env)
+            upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0
         except:
             upside_down_count = 0
         
@@ -321,9 +331,10 @@ class StandingTrainingCallback(BaseCallback):
         best_dir = Path("models") / "best"
         best_dir.mkdir(parents=True, exist_ok=True)
         
-        # 물구나무서기 통계 포함
+        # 통계 포함
         try:
-            upside_down_count = getattr(self.eval_env.standing_reward, 'upside_down_count', 0)
+            reward_obj = self._get_reward_object(self.eval_env)
+            upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0
             upside_down_info = f" (물구나무: {upside_down_count}회)"
         except:
             upside_down_info = ""
@@ -331,7 +342,6 @@ class StandingTrainingCallback(BaseCallback):
         best_path = best_dir / f"{self.args.task}_best_{self.num_timesteps}.zip"
         self.model.save(best_path)
         print(f"🏆 최고 성능 모델 저장: {best_path} (보상: {self.best_reward:.2f}){upside_down_info}")
-
 
 def train_with_optimized_parameters(args):  
     """2족 보행 최적화된 훈련 - 관찰 공간 호환성 수정"""
