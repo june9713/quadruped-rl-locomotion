@@ -1,6 +1,11 @@
 <mujoco model="go1">
+<!-- 
+좌표계 정의:
+- Pitch = 0도: 몸체 수평 (지면과 평행, 일반적인 4족 서기)
+- Pitch = -90도: 몸체 수직 (머리 위, 꼬리 아래, 2족 서기)
+- 현재 keyframe "home"은 표준 4족 서기 자세 (pitch=0)
+-->
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
-
   <option cone="elliptic" impratio="100"/>
 
   <default>
@@ -226,6 +231,7 @@
   </actuator>
 
   <keyframe>
+  <!-- 표준 4족 서기 자세: 몸체 수평, 높이 0.30m, 모든 관절이 중립 위치 -->
     <key name="home" qpos="0 0 0.30 1 0 0 0 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8"
       ctrl="0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8"/>
   </keyframe>
@@ -234,4 +240,12 @@
     <key name="home" qpos="0 0 0.42 1 0 0 0   -0.1 0.8 -1.2   0.1 0.8 -1.2   -0.1 1 -1.5   0.1 1 -1.5"
       ctrl="-0.1 0.8 -1.2   0.1 0.8 -1.2   -0.1 1 -1.5   0.1 1 -1.5"/>
   </keyframe> -->
+
+  
+    <!-- 참고용 2족 서기 자세: 몸체 수직, 높이 0.62m -->
+  <!-- 
+  <key name="bipedal_reference" 
+    qpos="0 0 0.62 0.087 0 -0.996 0   0 0 -1.6   0 0 -1.6   0 2.0 1   0 2.0 1"
+    comment="pitch=-86도(약-1.5rad), 2족서기 준비자세"/>
+  -->
 </mujoco>

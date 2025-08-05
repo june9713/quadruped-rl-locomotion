@@ -38,84 +38,107 @@ class StandingReward:
             'smooth_motion': 3.0    # 부드러운 동작
         }
 
-    def compute_reward(self, model, data):
-        """4족 서있기 보상 계산"""
+    def compute_reward(self, model, data, action):
+        """2족 보행 보상 계산 (리서치 기반 재설계)"""
         total_reward = 0.0
         reward_info = {}
-        
-        # 1. 높이 보상 (4족 서있기 목표 높이)
-        trunk_height = data.qpos[2]
-        target_height = 0.31  # 4족 서있기 목표 높이
-        height_error = abs(trunk_height - target_height)
-        height_reward = np.exp(-10 * height_error) if 0.22 < trunk_height < 0.40 else 0
-        total_reward += self.weights['height'] * height_reward
-        reward_info['height'] = height_reward
-        
-        # 2. 직립도 보상
+
+        # --- 1. 주요 물리량 사전 계산 ---
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = self._quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-        upright_reward = np.exp(-5 * (1 - up_vector[2])**2) if up_vector[2] > 0.85 else 0
-        total_reward += self.weights['upright'] * upright_reward
-        reward_info['upright'] = upright_reward
+        up_vector = trunk_rotation_matrix[:, 2] # 로봇의 Z축 벡터 (up-vector)
         
-        # 3. 발 접촉 보상
-        foot_contacts = self._get_foot_contacts(model, data)
-        contact_reward = np.mean(foot_contacts)  # 모든 발이 접촉할수록 높은 보상
-        total_reward += self.weights['foot_contact'] * contact_reward
-        reward_info['foot_contact'] = contact_reward
+        # Pitch 각도 계산 (2족 보행에서 중요)
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
         
-        # 4. 안정성 보상 (속도 제한)
-        linear_vel = np.linalg.norm(data.qvel[:3])
-        angular_vel = np.linalg.norm(data.qvel[3:6])
-        stability_reward = np.exp(-2 * (linear_vel + angular_vel))
-        total_reward += self.weights['balance'] * stability_reward
-        reward_info['balance'] = stability_reward
+        trunk_height = data.qpos[2]
+        com_position = self._get_com_position(model, data)
         
-        # 5. 좌우 안정성 보상
-        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        lateral_reward = np.exp(-5 * roll_angle**2)
-        total_reward += self.weights['lateral_stability'] * lateral_reward
-        reward_info['lateral_stability'] = lateral_reward
+        front_feet_heights = self._get_front_feet_heights(model, data)
+        rear_feet_positions = self._get_rear_feet_positions(model, data)
+
+        # --- 2. 핵심 보상 (Positive Rewards) ---
+
+        # ✅ [추가] 생존 보너스 (Survival Bonus)
+        survival_reward = self.weights['survival_bonus']
+        total_reward += survival_reward
+        reward_info['reward_survival'] = survival_reward
+
+        # [보상 1] 상체 직립 (Torso Upright) - 2족 보행용으로 수정
+        # 목표: pitch = -86도 (약 -1.5 라디안)
+        target_pitch = -1.5  # 라디안
+        pitch_error = abs(pitch_angle - target_pitch)
+        upright_reward = np.exp(-10 * pitch_error) if pitch_error < 0.5 else 0
+        total_reward += self.weights['torso_upright'] * upright_reward
+        reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
+
+        # [보상 2] 목표 높이 유지 (Height) - 2족 보행 높이로 수정
+        target_height = 0.62  # 2족 보행 목표 높이
+        height_error = abs(trunk_height - target_height)
+        height_reward = np.exp(-20 * height_error) if 0.55 < trunk_height < 0.70 else 0
+        total_reward += self.weights['height'] * height_reward
+        reward_info['reward_height'] = height_reward * self.weights['height']
+
+        # [보상 3] 무게중심 안정성 (CoM over Support Polygon)
+        support_center = np.mean(rear_feet_positions, axis=0)
+        com_xy = com_position[:2]
+        # 2족 보행에서는 무게중심이 약간 앞쪽에 있어야 함
+        target_com_offset = np.array([0.05, 0.0])  # 5cm 앞쪽
+        com_error = np.linalg.norm(com_xy - support_center - target_com_offset)
+        com_reward = np.exp(-15 * com_error)
+        total_reward += self.weights['com_over_support'] * com_reward
+        reward_info['reward_com_support'] = com_reward * self.weights['com_over_support']
         
-        # 6. 에너지 효율 페널티
-        joint_vel = data.qvel[7:]  # 관절 속도
-        energy_penalty = np.sum(joint_vel**2)
-        total_reward += self.weights['energy'] * energy_penalty
-        reward_info['energy'] = -energy_penalty
+        # [보상 4] 앞발 들기 (Front Feet Up) - 목표 높이 상향
+        avg_front_feet_height = np.mean(front_feet_heights)
+        # 2족 보행에서는 앞발이 충분히 높이 들려야 함
+        front_feet_reward = np.tanh(avg_front_feet_height / 0.25) if avg_front_feet_height > 0.1 else 0
+        total_reward += self.weights['front_feet_up'] * front_feet_reward
+        reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
+
+        # --- 3. 페널티 (Negative Rewards) ---
+        # [페널티 1] 과도한 상체 회전 속도 (Angular Velocity)
+        angular_vel_penalty = np.sum(np.square(data.qvel[3:6]))
+        total_reward += self.weights['angular_vel_penalty'] * angular_vel_penalty
+        reward_info['penalty_angular_vel'] = self.weights['angular_vel_penalty'] * angular_vel_penalty
         
-        # 7. 관절 한계 페널티
+        # [페널티 2] 불필요한 수평 이동 (Horizontal Velocity)
+        horizontal_vel_penalty = np.sum(np.square(data.qvel[:2]))
+        total_reward += self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
+        reward_info['penalty_horizontal_vel'] = self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
+        
+        # [페널티 3] 액션 변화율 (Action Rate)
+        if self._last_action is not None:
+            action_rate_penalty = np.sum(np.square(action - self._last_action))
+            total_reward += self.weights['action_rate_penalty'] * action_rate_penalty
+            reward_info['penalty_action_rate'] = self.weights['action_rate_penalty'] * action_rate_penalty
+        self._last_action = action
+
+        # [페널티 4] 에너지 (Torque)
+        energy_penalty = np.sum(np.square(data.ctrl))
+        total_reward += self.weights['energy_penalty'] * energy_penalty
+        reward_info['penalty_energy'] = self.weights['energy_penalty'] * energy_penalty
+
+        # [페널티 5] 관절 한계 (Joint Limit)
         joint_pos = data.qpos[7:]
-        joint_ranges = model.jnt_range[1:]  # 첫 번째는 root joint
+        joint_ranges = model.jnt_range[1:]
         limit_penalty = 0.0
         for i, pos in enumerate(joint_pos):
-            if pos < joint_ranges[i, 0]:
-                limit_penalty += (joint_ranges[i, 0] - pos) ** 2
-            elif pos > joint_ranges[i, 1]:
-                limit_penalty += (pos - joint_ranges[i, 1]) ** 2
-        total_reward += self.weights['joint_limit'] * limit_penalty
-        reward_info['joint_limit'] = -limit_penalty
+            if pos < joint_ranges[i, 0] * 0.95:
+                limit_penalty += (joint_ranges[i, 0] - pos)**2
+            elif pos > joint_ranges[i, 1] * 0.95:
+                limit_penalty += (pos - joint_ranges[i, 1])**2
+        total_reward += self.weights['joint_limit_penalty'] * limit_penalty
+        reward_info['penalty_joint_limit'] = self.weights['joint_limit_penalty'] * limit_penalty
         
-        # 8. 좌우 대칭성 보상
-        joint_pos = data.qpos[7:19]
-        front_diff = np.sum(np.abs(joint_pos[0:3] - joint_pos[3:6]))
-        rear_diff = np.sum(np.abs(joint_pos[6:9] - joint_pos[9:12]))
-        symmetry_error = front_diff + rear_diff
-        symmetry_reward = np.exp(-2 * symmetry_error)
-        total_reward += self.weights['symmetry'] * symmetry_reward
-        reward_info['symmetry'] = symmetry_reward
-        
-        # 9. 부드러운 동작 보상
-        if hasattr(self, '_prev_joint_pos'):
-            joint_acc = np.sum((joint_pos - self._prev_joint_pos)**2)
-            smooth_reward = np.exp(-5 * joint_acc)
-            total_reward += self.weights['smooth_motion'] * smooth_reward
-            reward_info['smooth_motion'] = smooth_reward
-        else:
-            reward_info['smooth_motion'] = 0.0
-        
-        self._prev_joint_pos = joint_pos.copy()
-        
+        # [페널티 6] 앞발 쓸림 (Foot Scuffing) - 높이 기준 상향
+        front_feet_h_vel = self._get_front_feet_horizontal_velocities(model, data)
+        scuff_penalty = np.sum(front_feet_h_vel * (np.array(front_feet_heights) < 0.1))
+        total_reward += self.weights['foot_scuff_penalty'] * scuff_penalty
+        reward_info['penalty_foot_scuff'] = self.weights['foot_scuff_penalty'] * scuff_penalty
+
+        total_reward = max(0, total_reward)
+
         return total_reward, reward_info
 
     def _quat_to_rotmat(self, quat):
@@ -597,33 +620,58 @@ class Go1StandingEnv(Go1MujocoEnv):
         return np.array([roll, pitch, yaw])
 
     def _set_bipedal_ready_pose(self):
-        """2족 보행 준비 자세 설정 - 안정화된 버전"""
+        """
+        2족 보행 준비 자세 설정 - 안정화된 버전
+        
+        좌표계 설명:
+        - Pitch = 0도: 몸체 수평 (XML keyframe "home" 상태)
+        - Pitch = -90도: 몸체 수직 (완전한 2족 서기)
+        - 현재 설정: Pitch = -86도 (거의 수직, 2족 서기 준비)
+        
+        자세 변환:
+        XML 기본(4족 수평) → 현재 함수(2족 거의 수직) → 목표(2족 완전 수직)
+        """
+        
         # --- 1. 트렁크 위치 및 자세 초기화 ---
         # x, y, yaw는 약간의 노이즈만 추가
         self.data.qpos[0:2] = np.random.uniform(-0.05, 0.05, 2)
         yaw_angle = np.random.uniform(-0.1, 0.1)
         
-        # 높이는 웅크린 자세에 맞게 고정 (0.3m)
+        # 높이는 2족 서기에 맞게 높게 설정 (0.62m)
+        # 참고: XML 기본 높이는 0.30m (4족 서기)
         self.data.qpos[2] = 0.62
         
-        # Roll, Pitch는 0에 가깝게 설정하여 안정적인 시작 유도
+        # Roll, Pitch 설정
         roll_angle = np.random.uniform(-0.05, 0.05)
-        pitch_angle = np.random.uniform(-1.5 , -1.5)
         
+        # ⚠️ 중요: Pitch = -1.5 라디안 ≈ -86도 (거의 수직 , 약 -90도)
+        # 이는 XML의 수평 상태(0도)에서 86도 회전하여 거의 수직으로 세운 것
+        pitch_angle = np.random.uniform(-1.5, -1.5)  # 고정값으로 설정
+        
+        # Euler angles를 Quaternion으로 변환
         r = Rotation.from_euler('xyz', [roll_angle, pitch_angle, yaw_angle])
         quat = r.as_quat() # [x, y, z, w]
         self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]] # w, x, y, z
 
+        # 각도 정보를 디버그용으로 저장 (선택사항)
+        if hasattr(self, '_debug_pose_info'):
+            self._debug_pose_info = {
+                'pitch_degrees': np.rad2deg(pitch_angle),
+                'target_pose': '2족 서기 준비 (거의 수직)',
+                'xml_reference': '4족 서기 (수평)'
+            }
+
         # --- 2. 관절 각도 초기화 ---
-        # 안정적으로 웅크린 자세의 기본 관절 각도
+        # 2족 서기에 맞는 관절 각도 설정
         base_joint_targets = np.array([
             # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
             0.0, 0, -1.6,
             0.0, 0, -1.6,
-            # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태
+            # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태  
             0.0, 2.0, 1,
             0.0, 2.0, 1,
         ])
+    
         
         # 모든 관절에 작은 노이즈 추가
         joint_noise = np.random.uniform(-0.1, 0.1, 12)
@@ -643,6 +691,33 @@ class Go1StandingEnv(Go1MujocoEnv):
 
         # --- 4. 시뮬레이션 상태 업데이트 ---
         mujoco.mj_forward(self.model, self.data)
+
+    def get_pose_info(self):
+        """현재 자세 정보 반환 (디버깅용)"""
+        trunk_quat = self.data.qpos[3:7]
+        pitch, roll, yaw = self._quat_to_euler(trunk_quat)
+        
+        return {
+            'height': self.data.qpos[2],
+            'pitch_degrees': np.rad2deg(pitch),
+            'roll_degrees': np.rad2deg(roll),
+            'yaw_degrees': np.rad2deg(yaw),
+            'pose_type': self._classify_pose(pitch)
+        }
+
+    def _classify_pose(self, pitch_rad):
+        """Pitch 각도에 따른 자세 분류"""
+        pitch_deg = np.rad2deg(pitch_rad)
+        
+        
+        if -10 <= pitch_deg <= 10:
+            return "4족 서기 (수평)"
+        elif -100 <= pitch_deg <= -80:
+            return "2족 서기 (수직)"
+        elif -80 <= pitch_deg <= -10:
+            return "중간 자세 (기울어짐)"
+        else:
+            return "비정상 자세"
 
     def _set_natural_standing_pose(self):
         """자연스러운 4족 서있기 자세 설정 - 적응적 노이즈 적용"""
@@ -877,44 +952,41 @@ class Go1StandingEnv(Go1MujocoEnv):
         return obs, reward, terminated, truncated, info
 
     def _is_terminated(self):
-        """2족 보행용 종료 조건 (사용자 정의 자세에 맞게 수정됨)"""
+        """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
         
-        # 1. 높이 체크 - 허용 범위 확장
-        # ✅ [수정] 초기 높이 0.62를 허용하기 위해 상한선을 0.8로 늘립니다.
-        if self.data.qpos[2] < 0.15 or self.data.qpos[2] > 0.8:
+        # 1. 높이 체크 - 2족 보행 허용 범위
+        if self.data.qpos[2] < 0.45 or self.data.qpos[2] > 0.80:
             return True
         
-        # 2. 기울기 체크 - 허용 범위 대폭 확장
+        # 2. Pitch 각도 체크 - 2족 보행 허용 범위
         trunk_quat = self.data.qpos[3:7]
-        # BipedalWalkingReward 클래스의 _quat_to_rotmat을 직접 호출하거나, 여기에 동일한 함수를 정의해야 합니다.
-        # BipedalWalkingEnv를 사용중이므로 self.bipedal_reward를 통해 접근합니다.
-        if hasattr(self, 'bipedal_reward'):
-            trunk_rotation_matrix = self.bipedal_reward._quat_to_rotmat(trunk_quat)
-        else: # 혹시 모를 경우를 대비
-            trunk_rotation_matrix = self.standing_reward._quat_to_rotmat(trunk_quat)
-
-        up_vector = trunk_rotation_matrix[:, 2]
+        trunk_rotation_matrix = self.bipedal_reward._quat_to_rotmat(trunk_quat)
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
         
-        # ✅ [수정] 초기 기울기 -1.5 라디안(약 -86도)을 허용하기 위해
-        # up_vector[2]의 하한선을 -0.2로 크게 낮춥니다.
-        # up_vector[2]가 -0.2보다 작아지는 경우는 약 101도 이상 기울어졌을 때입니다.
-        if up_vector[2] < -0.2:
+        # 목표 pitch: -1.5 라디안 (약 -86도)
+        # 허용 범위: -1.7 ~ -1.3 라디안 (약 -97도 ~ -74도)
+        if pitch_angle < -1.7 or pitch_angle > -1.3:
             return True
         
-        # 3. 속도 체크 - 기존 값 유지
+        # 3. Roll 각도 체크 - 좌우 기울기
+        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
+        if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
+            return True
+        
+        # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 3.0 or angular_vel > 8.0:
+        if linear_vel > 2.0 or angular_vel > 5.0:
             return True
         
-        # 4. 안정성 체크 - 기존 값 유지
+        # 5. 안정성 체크
         if not hasattr(self, '_instability_count'):
             self._instability_count = 0
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 50:
+            if self._instability_count > 30:  # 더 엄격하게
                 return True
         else:
             self._instability_count = 0
@@ -1092,20 +1164,26 @@ class BipedalWalkingEnv(Go1StandingEnv):
         return obs, reward, terminated, truncated, info
 
     def _is_bipedal_success(self):
-        """2족 보행 성공 판정"""
+        """2족 보행 성공 판정 - 실제 2족 자세 기준으로 수정"""
         
         # 1. 높이 확인
         trunk_height = self.data.qpos[2]
-        height_ok = 0.4 < trunk_height < 0.55
+        height_ok = 0.58 < trunk_height < 0.68  # 2족 보행 높이
         
-        # 2. 앞발이 들려있는지
+        # 2. Pitch 각도 확인
+        trunk_quat = self.data.qpos[3:7]
+        trunk_rotation_matrix = self.bipedal_reward._quat_to_rotmat(trunk_quat)
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
+        pitch_ok = -1.6 < pitch_angle < -1.4  # 목표 주변 ±0.1 라디안
+        
+        # 3. 앞발이 충분히 들려있는지
         front_feet_heights = [
             self._get_foot_height('FR'),
             self._get_foot_height('FL')
         ]
-        front_feet_up = all(h > 0.03 for h in front_feet_heights)
+        front_feet_up = all(h > 0.15 for h in front_feet_heights)  # 15cm 이상
         
-        # 3. 뒷발만 접촉
+        # 4. 뒷발만 접촉
         rear_contacts = [
             self._is_foot_contact('RR'),
             self._is_foot_contact('RL')
@@ -1116,15 +1194,16 @@ class BipedalWalkingEnv(Go1StandingEnv):
         ]
         rear_feet_only = all(rear_contacts) and not any(front_contacts)
         
-        # 4. 안정성
+        # 5. 안정성
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        stable = angular_vel < 2.0
+        linear_vel = np.linalg.norm(self.data.qvel[:3])
+        stable = angular_vel < 1.5 and linear_vel < 0.5
         
-        # 5. 지속 시간
-        duration_ok = self.episode_length > 200  # 2초 이상
+        # 6. 지속 시간
+        duration_ok = self.episode_length > 300  # 3초 이상
         
-        return (height_ok and front_feet_up and rear_feet_only and 
-                stable and duration_ok)
+        return (height_ok and pitch_ok and front_feet_up and 
+                rear_feet_only and stable and duration_ok)
 
 
 class BipedalCurriculumEnv(BipedalWalkingEnv):
@@ -1136,30 +1215,34 @@ class BipedalCurriculumEnv(BipedalWalkingEnv):
         self._setup_bipedal_curriculum()
 
     def _setup_bipedal_curriculum(self):
-        """2족 보행 단계별 커리큘럼"""
+        """2족 보행 단계별 커리큘럼 - 점진적 난이도 증가"""
         
         if self.curriculum_stage == 0:
-            # Stage 0: 무게중심 이동 학습
-            self.target_height = 0.35
-            self.front_feet_target = 0.02  # 살짝만 들기
+            # Stage 0: 무게중심 이동 학습 (4족에서 시작)
+            self.target_height = 0.40
+            self.target_pitch = -0.5  # 약 -29도
+            self.front_feet_target = 0.03
             self.stability_threshold = 5.0
             
         elif self.curriculum_stage == 1:
-            # Stage 1: 앞발 들기
-            self.target_height = 0.40
-            self.front_feet_target = 0.05
+            # Stage 1: 중간 자세
+            self.target_height = 0.48
+            self.target_pitch = -0.8  # 약 -46도
+            self.front_feet_target = 0.08
             self.stability_threshold = 4.0
             
         elif self.curriculum_stage == 2:
-            # Stage 2: 2족 자세 유지
-            self.target_height = 0.45
-            self.front_feet_target = 0.08
+            # Stage 2: 반직립 자세
+            self.target_height = 0.55
+            self.target_pitch = -1.2  # 약 -69도
+            self.front_feet_target = 0.12
             self.stability_threshold = 3.0
             
         else:
-            # Stage 3+: 안정적 2족 보행
-            self.target_height = 0.50
-            self.front_feet_target = 0.10
+            # Stage 3+: 완전한 2족 자세
+            self.target_height = 0.62
+            self.target_pitch = -1.5  # 약 -86도
+            self.front_feet_target = 0.18
             self.stability_threshold = 2.0
 
     def advance_curriculum(self, success_rate):
