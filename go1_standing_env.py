@@ -619,49 +619,100 @@ class Go1StandingEnv(Go1MujocoEnv):
         
         return np.array([roll, pitch, yaw])
 
+
+    def _is_initial_pose_unstable(self):
+        """초기 자세가 너무 불안정한지 확인"""
+        # 무게중심이 지지 다각형을 너무 벗어난 경우
+        com_position = self._get_com_position(self.model, self.data)
+        rear_feet_positions = self._get_rear_feet_positions(self.model, self.data)
+        support_center = np.mean(rear_feet_positions, axis=0)
+        com_error = np.linalg.norm(com_position[:2] - support_center)
+        
+        return com_error > 0.15  # 15cm 이상 벗어나면 불안정
+
+    def _set_bipedal_ready_pose_conservative(self):
+        """보수적인 2족 준비 자세 (fallback)"""
+        # 기본값에 가까운 안전한 설정
+        self.data.qpos[0:2] = 0.0  # x, y
+        self.data.qpos[2] = 0.62   # z
+        
+        # 안정적인 pitch 각도
+        pitch_angle = -1.5
+        r = Rotation.from_euler('xyz', [0, pitch_angle, 0])
+        quat = r.as_quat()
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
+        
+        # 기본 관절 각도 (노이즈 최소)
+        base_joints = np.array([
+            0.0, 0, -1.6, 0.0, 0, -1.6,  # 앞다리
+            0.0, 2.0, 1, 0.0, 2.0, 1,    # 뒷다리
+        ])
+        self.data.qpos[7:19] = base_joints
+        
+        # 속도는 모두 0
+        self.data.qvel[:] = 0.0
+        self.data.qacc[:] = 0.0
+        self.data.ctrl[:] = 0.0
+        
+        mujoco.mj_forward(self.model, self.data)
+
     def _set_bipedal_ready_pose(self):
         """
-        2족 보행 준비 자세 설정 - 안정화된 버전
+        2족 보행 준비 자세 설정 - 안정화된 버전 with 적응적 랜덤성
         
         좌표계 설명:
         - Pitch = 0도: 몸체 수평 (XML keyframe "home" 상태)
         - Pitch = -90도: 몸체 수직 (완전한 2족 서기)
         - 현재 설정: Pitch = -86도 (거의 수직, 2족 서기 준비)
-        
-        자세 변환:
-        XML 기본(4족 수평) → 현재 함수(2족 거의 수직) → 목표(2족 완전 수직)
         """
         
+        # 훈련 진행도에 따른 랜덤성 조절
+        if hasattr(self, 'total_timesteps'):
+            progress = min(self.total_timesteps / self.max_training_timesteps, 1.0)
+            # 초기에는 큰 랜덤성, 후반에는 작은 랜덤성
+            randomness_scale = 1.0 - 0.7 * progress  # 1.0 → 0.3
+        else:
+            randomness_scale = 1.0
+        
         # --- 1. 트렁크 위치 및 자세 초기화 ---
-        # x, y, yaw는 약간의 노이즈만 추가
-        self.data.qpos[0:2] = np.random.uniform(-0.05, 0.05, 2)
-        yaw_angle = np.random.uniform(-0.1, 0.1)
+        # x, y 위치에 더 큰 랜덤성
+        position_noise = 0.1 * randomness_scale
+        self.data.qpos[0] = np.random.uniform(-position_noise, position_noise)
+        self.data.qpos[1] = np.random.uniform(-position_noise, position_noise)
         
-        # 높이는 2족 서기에 맞게 높게 설정 (0.62m)
-        # 참고: XML 기본 높이는 0.30m (4족 서기)
-        self.data.qpos[2] = 0.62
+        # Yaw(회전)에도 랜덤성 추가
+        yaw_noise = 0.2 * randomness_scale
+        yaw_angle = np.random.uniform(-yaw_noise, yaw_noise)
         
-        # Roll, Pitch 설정
-        roll_angle = np.random.uniform(-0.05, 0.05)
+        # 높이 랜덤성 - 목표 높이 주변에서 변동
+        height_noise = 0.08 * randomness_scale
+        self.data.qpos[2] = 0.62 + np.random.uniform(-height_noise, height_noise)
         
-        # ⚠️ 중요: Pitch = -1.5 라디안 ≈ -86도 (거의 수직 , 약 -90도)
-        # 이는 XML의 수평 상태(0도)에서 86도 회전하여 거의 수직으로 세운 것
-        pitch_angle = np.random.uniform(-1.5, -1.5)  # 고정값으로 설정
+        # Roll 랜덤성 - 좌우 기울기
+        roll_noise = 0.1 * randomness_scale
+        roll_angle = np.random.uniform(-roll_noise, roll_noise)
+        
+        # Pitch 랜덤성 - 2족 자세의 핵심
+        # 초기에는 더 다양한 각도에서 시작 (-70도 ~ -95도)
+        pitch_base = -1.5  # -86도
+        pitch_noise = 0.25 * randomness_scale
+        pitch_angle = pitch_base + np.random.uniform(-pitch_noise, pitch_noise)
+        
+        # 가끔 더 극단적인 초기 자세 시도 (탐색 촉진)
+        if randomness_scale > 0.5 and np.random.random() < 0.2:
+            # 20% 확률로 더 큰 변동
+            extreme_pitch = np.random.choice([
+                -1.2,  # 더 앞으로 기울임 (-69도)
+                -1.7,  # 더 뒤로 기울임 (-97도)
+            ])
+            pitch_angle = extreme_pitch
         
         # Euler angles를 Quaternion으로 변환
         r = Rotation.from_euler('xyz', [roll_angle, pitch_angle, yaw_angle])
         quat = r.as_quat() # [x, y, z, w]
         self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]] # w, x, y, z
 
-        # 각도 정보를 디버그용으로 저장 (선택사항)
-        if hasattr(self, '_debug_pose_info'):
-            self._debug_pose_info = {
-                'pitch_degrees': np.rad2deg(pitch_angle),
-                'target_pose': '2족 서기 준비 (거의 수직)',
-                'xml_reference': '4족 서기 (수평)'
-            }
-
-        # --- 2. 관절 각도 초기화 ---
+        # --- 2. 관절 각도 초기화 with 적응적 랜덤성 ---
         # 2족 서기에 맞는 관절 각도 설정
         base_joint_targets = np.array([
             # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
@@ -671,26 +722,61 @@ class Go1StandingEnv(Go1MujocoEnv):
             0.0, 2.0, 1,
             0.0, 2.0, 1,
         ])
-    
         
-        # 모든 관절에 작은 노이즈 추가
-        joint_noise = np.random.uniform(-0.1, 0.1, 12)
+        # 관절별 차별화된 랜덤성
+        joint_noise = np.zeros(12)
+        for i in range(12):
+            if i % 3 == 0:  # Hip joints - 적은 노이즈
+                noise_range = 0.15 * randomness_scale
+            elif i % 3 == 1:  # Thigh joints - 중간 노이즈
+                noise_range = 0.25 * randomness_scale
+            else:  # Calf joints - 큰 노이즈 (안정성에 덜 중요)
+                noise_range = 0.35 * randomness_scale
+            
+            joint_noise[i] = np.random.uniform(-noise_range, noise_range)
+        
+        # 좌우 비대칭성 추가 (균형 감각 학습)
+        if randomness_scale > 0.3 and np.random.random() < 0.3:
+            asymmetry = np.random.uniform(-0.1, 0.1) * randomness_scale
+            # 왼쪽 다리
+            joint_noise[0:3] += asymmetry
+            joint_noise[6:9] += asymmetry
+            # 오른쪽 다리 (반대)
+            joint_noise[3:6] -= asymmetry
+            joint_noise[9:12] -= asymmetry
+        
         joint_targets = base_joint_targets + joint_noise
         
         # 관절 한계 내로 클리핑
         joint_ranges = self.model.jnt_range[1:]
-        joint_targets = np.clip(joint_targets, joint_ranges[:, 0], joint_ranges[:, 1])
+        joint_targets = np.clip(joint_targets, 
+                            joint_ranges[:, 0] * 0.95, 
+                            joint_ranges[:, 1] * 0.95)
         
         self.data.qpos[7:19] = joint_targets
 
-        # --- 3. 속도 초기화 ---
-        # 모든 속도는 0으로 시작하여 안정성 확보
-        self.data.qvel[:] = 0.0
+        # --- 3. 속도 초기화 with 작은 랜덤성 ---
+        # 완전히 0이 아닌 작은 초기 속도 (더 자연스러운 시작)
+        vel_noise_scale = 0.05 * randomness_scale
+        
+        # 선속도
+        self.data.qvel[:3] = np.random.normal(0, vel_noise_scale, 3)
+        # 각속도 (더 작게)
+        self.data.qvel[3:6] = np.random.normal(0, vel_noise_scale * 0.5, 3)
+        # 관절 속도
+        self.data.qvel[6:] = np.random.normal(0, vel_noise_scale * 0.3, 12)
+        
         self.data.qacc[:] = 0.0
         self.data.ctrl[:] = 0.0
 
         # --- 4. 시뮬레이션 상태 업데이트 ---
         mujoco.mj_forward(self.model, self.data)
+        
+        # --- 5. 안정성 체크 (너무 불안정한 초기 상태 방지) ---
+        # 너무 극단적인 경우 재시도
+        if self._is_initial_pose_unstable():
+            # 더 보수적인 설정으로 재시도
+            self._set_bipedal_ready_pose_conservative()
 
     def get_pose_info(self):
         """현재 자세 정보 반환 (디버깅용)"""
