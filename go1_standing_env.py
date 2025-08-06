@@ -1304,8 +1304,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         # 목표 pitch: -1.5 라디안 (약 -86도)
         # 허용 범위: -1.7 ~ -1.3 라디안
-        if pitch_angle < -1.7 or pitch_angle > -1.3:
-            return True
+        #if pitch_angle < -1.7 or pitch_angle > -1.3:
+        #    return True
         
         # 3. Roll 각도 체크 - 좌우 기울기
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
