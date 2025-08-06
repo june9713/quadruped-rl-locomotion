@@ -1293,8 +1293,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
         
         # 1. 높이 체크 - 2족 보행 허용 범위
-        #if self.data.qpos[2] < 0.35 or self.data.qpos[2] > 0.90: # 허용 범위를 0.35m ~ 0.90m로 확장
-        #    return True
+        if self.data.qpos[2] < 0.35 or self.data.qpos[2] > 0.90: # 허용 범위를 0.35m ~ 0.90m로 확장
+            return True
         
         # 2. Pitch 각도 체크 - 2족 보행 허용 범위
         trunk_quat = self.data.qpos[3:7]
@@ -1305,19 +1305,19 @@ class BipedalWalkingEnv(Go1StandingEnv):
         # 목표 pitch: -1.5 라디안 (약 -86도)
         # 허용 범위: -1.7 ~ -1.3 라디안
         #if pitch_angle < -1.7 or pitch_angle > -1.3:
-        #    return True
+       #     return True
         
         # 3. Roll 각도 체크 - 좌우 기울기
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        #if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
-        #    return True
+        if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
+            return True
         
         # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        #if linear_vel > 2.0 or angular_vel > 5.0:
-        #    return True
+        if linear_vel > 2.0 or angular_vel > 5.0:
+            return True
         
         # 5. 안정성 체크
         if not hasattr(self, '_instability_count'):
