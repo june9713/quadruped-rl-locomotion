@@ -85,6 +85,10 @@ def parse_arguments():
     parser.add_argument('--ignore_pretrained_obs_mismatch', action='store_true',
                        help='사전훈련 모델과 관찰공간 불일치 무시하고 새 모델 생성')
     
+    # ✅ 랜덤성 강도 조정 옵션 추가
+    parser.add_argument('--randomness_intensity', type=float, default=1.5,
+                       help='훈련 시 랜덤성 강도 (0.0=없음, 1.0=기본, 2.0=강화, 기본값: 1.5)')
+    
     return parser.parse_args()
 
 
@@ -350,6 +354,14 @@ def train_with_optimized_parameters(args):
     print(f"  - 커리큘럼 학습: {'사용' if args.use_curriculum else '미사용'}")
     print(f"  - 조기 정지: {'사용' if args.early_stopping else '미사용'}")
     
+    # ✅ 랜덤성 강도 설정 추가
+    from go1_standing_env import RobotPhysicsUtils
+    
+    # 명령행 인수에서 랜덤성 강도 가져오기
+    randomness_intensity = args.randomness_intensity
+    RobotPhysicsUtils.set_randomness_intensity(randomness_intensity)
+    print(f"🎛️ 랜덤성 강도 설정: {randomness_intensity}")
+    
     # 환경에 전달할 파라미터만 포함
     env_kwargs = {
         'randomize_physics': True,
@@ -566,6 +578,7 @@ def train_with_optimized_parameters(args):
         f.write(f"Total timesteps: {args.total_timesteps:,}\n")
         f.write(f"Training time: {training_time/3600:.2f} hours\n")
         f.write(f"Used pretrained model: {use_pretrained}\n")
+        f.write(f"Randomness intensity: {randomness_intensity}\n")  # ✅ 랜덤성 강도 기록
         if use_pretrained:
             f.write(f"Pretrained model path: {pretrained_model_path}\n")
         f.write(f"Environment observation mode: {'Base(45dim)' if env_kwargs.get('use_base_observation', False) else 'Extended(56dim)'}\n")
