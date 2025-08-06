@@ -1298,9 +1298,10 @@ class BipedalWalkingEnv(Go1StandingEnv):
         
         # 2. Pitch 각도 체크 - 2족 보행 허용 범위
         trunk_quat = self.data.qpos[3:7]
+        # pitch, roll, _ = self._quat_to_euler(trunk_quat) # 올바른 함수 사용
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
-        
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0]) # 올바른 수식으로 수정
+
         # 목표 pitch: -1.5 라디안 (약 -86도)
         # 허용 범위: -1.7 ~ -1.3 라디안
         if pitch_angle < -1.7 or pitch_angle > -1.3:
@@ -1354,7 +1355,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         # 2. Pitch 각도 확인
         trunk_quat = self.data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0]) # ✅ 올바른 수식으로 수정
         pitch_ok = -1.6 < pitch_angle < -1.4  # 목표 주변 ±0.1 라디안
         
         # 3. 앞발이 충분히 들려있는지
