@@ -974,7 +974,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         mujoco.mj_forward(self.model, self.data)
         
         # 30% 확률로만 안정성 체크 (전역 강도에 따라 조정)
-        if np.random.random() < 0.3 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY and self._is_initial_pose_unstable():
+        if np.random.random() < 0.5 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY and self._is_initial_pose_unstable():
             self._set_bipedal_ready_pose_conservative()
 
     def get_pose_info(self):
@@ -1325,7 +1325,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 30:  # 더 엄격하게
+            if self._instability_count > 50:  # 더 엄격하게
                 return True
         else:
             self._instability_count = 0
