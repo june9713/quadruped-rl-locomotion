@@ -1310,21 +1310,26 @@ class BipedalWalkingEnv(Go1StandingEnv):
             #print(f"훈련 종료! 높이 초과: {self.data.qpos[2]}")
             return True
         
-        # 2. Pitch 각도 체크 - 2족 보행 허용 범위
+        # 2. 기울기 체크
         trunk_quat = self.data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
+        
+        # [수정] pitch와 roll 각도를 계산하고 '도(degree)' 단위로 변환합니다.
         pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
-
-        # 목표 pitch: -1.5 라디안 (약 -86도)
-        # (기존: -1.7 ~ -1.3 라디안)
-        if pitch_angle < -1.9 or pitch_angle > -1.1: # ✅ [수정] Pitch 허용 각도 범위 확장
-            #print(f"훈련 종료! Pitch 각도 초과: {pitch_angle}")
+        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
+        
+        pitch_angle_deg = np.rad2deg(pitch_angle)
+        roll_angle_deg = np.rad2deg(roll_angle)
+        
+        # 목표 pitch: 약 -86도. 허용 범위를 -109도 ~ -63도로 설정 (기존 -1.9 ~ -1.1 라디안)
+        pitch_range = 50
+        if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range): # ✅ [수정] Pitch 허용 각도 범위를 '도' 단위로 변경
+            #print(f"훈련 종료! Pitch 각도(도) 초과: {pitch_angle_deg}")
             return True
         
-        # 3. Roll 각도 체크 - 좌우 기울기 
-        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        if abs(roll_angle) > np.deg2rad(35):  # ✅ [수정] Roll 허용 각도를 45도로 확장
-            #print(f"훈련 종료! Roll 각도 초과: {roll_angle}")
+        # Roll 허용 각도를 50도로 설정
+        if abs(roll_angle_deg) > 50 or abs(roll_angle_deg) < -50:
+            #print(f"훈련 종료! Roll 각도(도) 초과: {roll_angle_deg}")
             return True
         
         # 4. 속도 체크 (기존: linear_vel > 2.0)
