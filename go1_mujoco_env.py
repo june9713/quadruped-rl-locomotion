@@ -297,12 +297,14 @@ class Go1MujocoEnv(MujocoEnv):
             + joint_limit_cost
         )
         
-        reward = max(0.0, rewards - costs)
+        # [수정] max(0.0, ...) 제거하여 음수 보상 허용
+        # reward = max(0.0, rewards - costs) # <- 기존 코드
+        reward = rewards - costs           # <- 수정된 코드
 
         reward_info = {
             "linear_vel_tracking_reward": linear_vel_tracking_reward,
             "reward_ctrl": -ctrl_cost,
-            "reward_survive": healthy_reward,
+            "reward_survive": healthy_reward, # healthy_reward 가중치가 0이라 현재는 효과 없음
         }
 
         return reward, reward_info
