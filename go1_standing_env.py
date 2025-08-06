@@ -941,41 +941,56 @@ class Go1StandingEnv(Go1MujocoEnv):
         mujoco.mj_forward(self.model, self.data)
 
     def _set_bipedal_ready_pose(self):
-        """2족 보행 준비 자세 설정 - 통합 랜덤성 적용"""
+        """2족 보행 준비 자세 설정 - 안정적인 초기 자세"""
         
         # 훈련 진행도 계산
         progress = min(getattr(self, 'total_timesteps', 0) / self.max_training_timesteps, 1.0)
         
-        # ✅ 파라미터명 수정: local_multiplier -> intensity_multiplier
-        config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=2.5)
+        # ✅ 초기에는 매우 낮은 랜덤성으로 시작
+        initial_intensity = 0.1 if self.episode_length == 0 else 1.0
+        config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=initial_intensity)
         
-        # 위치 랜덤화
-        RobotPhysicsUtils.apply_random_position(self.data, config)
+        # 기본 안정적인 자세 설정
+        self.data.qpos[0:2] = 0.0  # x, y
+        self.data.qpos[2] = 0.62   # z - 2족 준비 높이
         
-        # 높이 랜덤화 (2족용)
-        RobotPhysicsUtils.apply_random_height(self.data, base_height=0.62, config=config)
+        # 2족 준비 자세 pitch
+        pitch_angle = -1.5  # 약 -86도
+        r = Rotation.from_euler('xyz', [0, pitch_angle, 0])
+        quat = r.as_quat()
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
         
-        # 자세 랜덤화 (2족용 pitch)
-        RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=-1.5, config=config)
+        # 안정적인 2족 준비 관절 각도
+        self.data.qpos[7:19] = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
         
-        # 관절 랜덤화 (2족용)
-        base_joints = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
-        joint_ranges = self.model.jnt_range[1:]
-        RobotPhysicsUtils.apply_random_joints(self.data, base_joints, joint_ranges, config)
-        
-        # 속도 랜덤화
-        RobotPhysicsUtils.apply_random_velocity(self.data, config)
-        
-        # 초기화
+        # 속도 초기화
+        self.data.qvel[:] = 0.0
         self.data.qacc[:] = 0.0
         self.data.ctrl[:] = 0.0
         
         # 물리 시뮬레이션 적용
         mujoco.mj_forward(self.model, self.data)
         
-        # 30% 확률로만 안정성 체크 (전역 강도에 따라 조정)
-        if np.random.random() < 0.3 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY and self._is_initial_pose_unstable():
-            self._set_bipedal_ready_pose_conservative()
+        # 초기 에피소드가 아닌 경우에만 랜덤성 적용
+        if self.episode_length > 0 and RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY > 0:
+            # 위치 랜덤화
+            RobotPhysicsUtils.apply_random_position(self.data, config)
+            
+            # 높이 랜덤화 (2족용) - 작은 범위로
+            height_noise = np.random.uniform(-0.05, 0.05) * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY
+            self.data.qpos[2] += height_noise
+            
+            # 자세 랜덤화 - 작은 범위로
+            pitch_noise = np.random.uniform(-0.1, 0.1) * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY
+            r = Rotation.from_euler('xyz', [0, pitch_angle + pitch_noise, 0])
+            quat = r.as_quat()
+            self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
+            
+            # 관절 랜덤화 - 작은 범위로
+            joint_noise = np.random.uniform(-0.05, 0.05, 12) * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY
+            self.data.qpos[7:19] += joint_noise
+            
+            mujoco.mj_forward(self.model, self.data)
 
     def get_pose_info(self):
         """현재 자세 정보 반환 (디버깅용)"""
@@ -1236,14 +1251,17 @@ class BipedalWalkingEnv(Go1StandingEnv):
         self.episode_length = 0
         self.max_episode_length = 1000
 
-        # 2족 보행을 위한 건강 상태 조건
-        self._healthy_z_range = (0.25, 0.60)  # 2족 보행 높이 범위
-        self._healthy_pitch_range = (-np.deg2rad(30), np.deg2rad(30))  # 더 관대한 기울기
-        self._healthy_roll_range = (-np.deg2rad(30), np.deg2rad(30))
+        # 2족 보행을 위한 건강 상태 조건 - 더 관대하게 수정
+        self._healthy_z_range = (0.15, 0.80)  # ✅ 확대: 0.25-0.60 → 0.15-0.80
+        self._healthy_pitch_range = (-np.deg2rad(100), np.deg2rad(30))  # ✅ 확대: 2족은 pitch가 -90도 근처
+        self._healthy_roll_range = (-np.deg2rad(40), np.deg2rad(40))    # ✅ 확대: 30도 → 40도
 
         # Domain randomization 설정
         self.randomize_physics = kwargs.get('randomize_physics', True)
         self.original_gravity = None
+        
+        # 불안정성 카운터 초기화
+        self._instability_count = 0
 
     def reset(self, seed=None, options=None):
         """환경 리셋 - 2족 보행 준비 자세에서 시작"""
@@ -1290,41 +1308,41 @@ class BipedalWalkingEnv(Go1StandingEnv):
         return obs, reward, terminated, truncated, info
 
     def _is_terminated(self):
-        """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
+        """2족 보행용 종료 조건 (더 관대하게 수정)"""
         
-        # 1. 높이 체크 - 2족 보행 허용 범위
-        if self.data.qpos[2] < 0.45 or self.data.qpos[2] > 0.80:
+        # 1. 높이 체크 - 매우 관대한 범위
+        if self.data.qpos[2] < 0.10 or self.data.qpos[2] > 0.90:  # ✅ 0.45-0.80 → 0.10-0.90
             return True
         
-        # 2. Pitch 각도 체크 - 2족 보행 허용 범위
+        # 2. Pitch 각도 체크 - 2족 자세 허용 범위 확대
         trunk_quat = self.data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
+        pitch_angle = np.arcsin(np.clip(-trunk_rotation_matrix[0, 2], -1.0, 1.0))  # ✅ clip 추가
         
         # 목표 pitch: -1.5 라디안 (약 -86도)
-        # 허용 범위: -1.7 ~ -1.3 라디안
-        if pitch_angle < -1.7 or pitch_angle > -1.3:
+        # 허용 범위: -2.0 ~ -0.5 라디안 (약 -115도 ~ -29도)
+        if pitch_angle < -2.0 or pitch_angle > -0.5:  # ✅ 범위 대폭 확대
             return True
         
         # 3. Roll 각도 체크 - 좌우 기울기
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
+        if abs(roll_angle) > np.deg2rad(35):  # ✅ 20도 → 35도
             return True
         
         # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 2.0 or angular_vel > 5.0:
+        if linear_vel > 3.0 or angular_vel > 7.0:  # ✅ 한계 상향: 2.0→3.0, 5.0→7.0
             return True
         
-        # 5. 안정성 체크
+        # 5. 안정성 체크 - 더 관대하게
         if not hasattr(self, '_instability_count'):
             self._instability_count = 0
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 30:  # 더 엄격하게
+            if self._instability_count > 50:  # ✅ 30 → 50 (더 관대하게)
                 return True
         else:
             self._instability_count = 0
@@ -1332,14 +1350,14 @@ class BipedalWalkingEnv(Go1StandingEnv):
         return False
 
     def _is_unstable(self):
-        """불안정 상태 판정"""
+        """불안정 상태 판정 - 더 관대하게"""
         # 각속도가 너무 클 때
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        if angular_vel > 4.0:
+        if angular_vel > 6.0:  # ✅ 4.0 → 6.0
             return True
         
         # 높이가 너무 낮을 때
-        if self.data.qpos[2] < 0.2:
+        if self.data.qpos[2] < 0.10:  # ✅ 0.2 → 0.10
             return True
         
         return False
