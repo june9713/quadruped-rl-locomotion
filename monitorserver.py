@@ -65,7 +65,7 @@ async def index(request: Request):
     index_template_path = TEMPLATE_DIR / "index.html"
     if not index_template_path.exists():
         return HTMLResponse(content="<h1>서버 실행 중</h1><p>'templates/index.html' 파일을 생성해주세요.</p>", status_code=200)
-    return templates.TemplateResponse("index.html", {"request": request, "videos": videos})
+    return templates.TemplateResponse("index.html", {"request": request, "videos": videos, "VIDEO_DIR_NAME": VIDEO_DIR_NAME})
 
 @app.get("/api/videos")
 async def get_videos_api():
@@ -164,5 +164,6 @@ async def stream_video(filename: str, request: Request):
 
 
 if __name__ == "__main__":
-    # uvicorn.run에 문자열로 앱 경로를 전달하여 reload 활성화
-    uvicorn.run("main:app", host="0.0.0.0", port=8898, reload=True)
+    # uvicorn.run에 '파일이름:앱객체' 형식으로 전달
+    # 파일 이름이 monitorserver.py이므로 "monitorserver:app"으로 변경
+    uvicorn.run("monitorserver:app", host="0.0.0.0", port=8898, reload=True)
