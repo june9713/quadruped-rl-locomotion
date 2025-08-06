@@ -1308,9 +1308,9 @@ class BipedalWalkingEnv(Go1StandingEnv):
             print(f"훈련 종료! Pitch 각도 초과: {pitch_angle}")
             return True
         
-        # 3. Roll 각도 체크 - 좌우 기울기 (기존: 20도)
+        # 3. Roll 각도 체크 - 좌우 기울기 
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        if abs(roll_angle) > np.deg2rad(30):  # ✅ [수정] Roll 허용 각도를 30도로 확장
+        if abs(roll_angle) > np.deg2rad(35):  # ✅ [수정] Roll 허용 각도를 45도로 확장
             print(f"훈련 종료! Roll 각도 초과: {roll_angle}")
             return True
         
