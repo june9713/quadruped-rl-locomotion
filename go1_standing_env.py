@@ -1293,7 +1293,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
         
         # 1. 높이 체크 - 2족 보행 허용 범위
-        if self.data.qpos[2] < 0.45 or self.data.qpos[2] > 0.80:
+        if self.data.qpos[2] < 0.35 or self.data.qpos[2] > 0.90: # 허용 범위를 0.35m ~ 0.90m로 확장
             return True
         
         # 2. Pitch 각도 체크 - 2족 보행 허용 범위
