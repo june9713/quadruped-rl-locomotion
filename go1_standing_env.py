@@ -1294,6 +1294,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         
         # 1. 높이 체크 - 2족 보행 허용 범위 (기존: 0.35 ~ 0.90)
         if self.data.qpos[2] < 0.30 or self.data.qpos[2] > 0.95: # ✅ [수정] 허용 높이 범위 확장
+            print(f"훈련 종료! 높이 초과: {self.data.qpos[2]}")
             return True
         
         # 2. Pitch 각도 체크 - 2족 보행 허용 범위
@@ -1304,11 +1305,13 @@ class BipedalWalkingEnv(Go1StandingEnv):
         # 목표 pitch: -1.5 라디안 (약 -86도)
         # (기존: -1.7 ~ -1.3 라디안)
         if pitch_angle < -1.9 or pitch_angle > -1.1: # ✅ [수정] Pitch 허용 각도 범위 확장
+            print(f"훈련 종료! Pitch 각도 초과: {pitch_angle}")
             return True
         
         # 3. Roll 각도 체크 - 좌우 기울기 (기존: 20도)
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
         if abs(roll_angle) > np.deg2rad(30):  # ✅ [수정] Roll 허용 각도를 30도로 확장
+            print(f"훈련 종료! Roll 각도 초과: {roll_angle}")
             return True
         
         # 4. 속도 체크 (기존: linear_vel > 2.0)
@@ -1316,6 +1319,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
         if linear_vel > 2.5 or angular_vel > 6.0: # ✅ [수정] 선속도 및 각속도 허용치 증가
+            print(f"훈련 종료! 속도 초과: {linear_vel}, {angular_vel}")
             return True
         
         # 5. 안정성 체크 (수정 없음)
@@ -1325,6 +1329,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         if self._is_unstable():
             self._instability_count += 1
             if self._instability_count > 50:
+                print(f"훈련 종료! 안정성 초과: {self._instability_count}")
                 return True
         else:
             self._instability_count = 0
