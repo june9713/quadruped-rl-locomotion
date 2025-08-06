@@ -1309,8 +1309,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         
         # 3. Roll 각도 체크 - 좌우 기울기
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
-            return True
+        #if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
+        #    return True
         
         # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
