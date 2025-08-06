@@ -1325,7 +1325,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 50:  # 더 엄격하게
+            if self._instability_count > 50:  # 불안정성 허용 시간 완화
                 return True
         else:
             self._instability_count = 0
