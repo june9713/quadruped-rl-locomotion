@@ -623,10 +623,12 @@ class BipedWalkingReward:
             # --- 핵심 성공 요소 (Key Success Factors) ---
             'torso_upright': 15.0,
             'height': 8.0,
-            'com_over_support': 12.0,
-            'front_feet_up': 10.0,
             
-            # ✅ [추가] 생존 보너스: 넘어지지 않고 버티는 것만으로도 보상
+            # ✅ [수정] 새로운 보상 가중치 추가
+            'com_alignment': 12.0,       # 무게중심을 뒷다리 쪽으로 정렬
+            'stability': 7.0,            # 안정적으로 균형 유지
+            
+            'front_feet_up': 10.0,
             'survival_bonus': 5.0,
 
             # --- 안정화 및 페널티 (Stabilization & Penalties) ---
@@ -640,79 +642,87 @@ class BipedWalkingReward:
         # 이전 액션 저장을 위한 변수
         self._last_action = None
 
+
     def compute_reward(self, model, data, action):
-        """2족 보행 보상 계산 (리서치 기반 재설계)"""
+        """2족 보행 보상 계산 (개선된 버전)"""
         total_reward = 0.0
         reward_info = {}
 
         # --- 1. 주요 물리량 사전 계산 ---
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2] # 로봇의 Z축 벡터 (up-vector)
+        up_vector = trunk_rotation_matrix[:, 2]
         
         trunk_height = data.qpos[2]
         com_position = RobotPhysicsUtils.get_com_position(model, data)
         
         front_feet_heights = RobotPhysicsUtils.get_front_feet_heights(model, data)
         rear_feet_positions = RobotPhysicsUtils.get_rear_feet_positions(model, data)
+        
+        angular_velocity = np.linalg.norm(data.qvel[3:6])
 
         # --- 2. 핵심 보상 (Positive Rewards) ---
 
-        # ✅ [추가] 생존 보너스 (Survival Bonus)
+        # [보상] 생존 보너스
         survival_reward = self.weights['survival_bonus']
         total_reward += survival_reward
         reward_info['reward_survival'] = survival_reward
 
-        # [보상 1] 상체 직립 (Torso Upright)
+        # [보상] 상체 직립
         upright_reward = up_vector[2]
         total_reward += self.weights['torso_upright'] * upright_reward
         reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
 
-        # [보상 2] 목표 높이 유지 (Height)
+        # [보상] 목표 높이 유지
         target_height = 0.48
         height_error = abs(trunk_height - target_height)
         height_reward = np.exp(-15 * height_error)
         total_reward += self.weights['height'] * height_reward
         reward_info['reward_height'] = height_reward * self.weights['height']
 
-        # [보상 3] 무게중심 안정성 (CoM over Support Polygon)
-        support_center = np.mean(rear_feet_positions, axis=0)
-        com_xy = com_position[:2]
-        com_error = np.linalg.norm(com_xy - support_center)
-        com_reward = np.exp(-20 * com_error)
-        total_reward += self.weights['com_over_support'] * com_reward
-        reward_info['reward_com_support'] = com_reward * self.weights['com_over_support']
+        # ✅ [추가 보상 1] 무게중심 정렬 (일어서기 준비 동작)
+        support_center_x = np.mean([pos[0] for pos in rear_feet_positions])
+        com_x = com_position[0]
+        alignment_error = abs(com_x - support_center_x)
+        com_alignment_reward = np.exp(-25 * alignment_error)
+        total_reward += self.weights['com_alignment'] * com_alignment_reward
+        reward_info['reward_com_alignment'] = com_alignment_reward * self.weights['com_alignment']
         
-        # [보상 4] 앞발 들기 (Front Feet Up)
+        # ✅ [추가 보상 2] 안정성 (낮은 각속도 유지)
+        stability_reward = np.exp(-2.0 * angular_velocity)
+        total_reward += self.weights['stability'] * stability_reward
+        reward_info['reward_stability'] = stability_reward * self.weights['stability']
+        
+        # [보상] 앞발 들기
         avg_front_feet_height = np.mean(front_feet_heights)
         front_feet_reward = np.tanh(avg_front_feet_height / 0.15)
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
 
         # --- 3. 페널티 (Negative Rewards) ---
-        # [페널티 1] 과도한 상체 회전 속도 (Angular Velocity)
+        # [페널티] 과도한 상체 회전 속도
         angular_vel_penalty = np.sum(np.square(data.qvel[3:6]))
         total_reward += self.weights['angular_vel_penalty'] * angular_vel_penalty
         reward_info['penalty_angular_vel'] = self.weights['angular_vel_penalty'] * angular_vel_penalty
         
-        # [페널티 2] 불필요한 수평 이동 (Horizontal Velocity)
+        # [페널티] 불필요한 수평 이동
         horizontal_vel_penalty = np.sum(np.square(data.qvel[:2]))
         total_reward += self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
         reward_info['penalty_horizontal_vel'] = self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
         
-        # [페널티 3] 액션 변화율 (Action Rate)
+        # [페널티] 액션 변화율
         if self._last_action is not None:
             action_rate_penalty = np.sum(np.square(action - self._last_action))
             total_reward += self.weights['action_rate_penalty'] * action_rate_penalty
             reward_info['penalty_action_rate'] = self.weights['action_rate_penalty'] * action_rate_penalty
         self._last_action = action
 
-        # [페널티 4] 에너지 (Torque)
+        # [페널티] 에너지
         energy_penalty = np.sum(np.square(data.ctrl))
         total_reward += self.weights['energy_penalty'] * energy_penalty
         reward_info['penalty_energy'] = self.weights['energy_penalty'] * energy_penalty
 
-        # [페널티 5] 관절 한계 (Joint Limit)
+        # [페널티] 관절 한계
         joint_pos = data.qpos[7:]
         joint_ranges = model.jnt_range[1:]
         limit_penalty = 0.0
@@ -724,7 +734,7 @@ class BipedWalkingReward:
         total_reward += self.weights['joint_limit_penalty'] * limit_penalty
         reward_info['penalty_joint_limit'] = self.weights['joint_limit_penalty'] * limit_penalty
         
-        # [페널티 6] 앞발 쓸림 (Foot Scuffing)
+        # [페널티] 앞발 쓸림
         front_feet_h_vel = RobotPhysicsUtils.get_front_feet_horizontal_velocities(model, data)
         scuff_penalty = np.sum(front_feet_h_vel * (np.array(front_feet_heights) < 0.05))
         total_reward += self.weights['foot_scuff_penalty'] * scuff_penalty
