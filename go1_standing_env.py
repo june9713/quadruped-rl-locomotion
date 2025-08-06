@@ -1316,8 +1316,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 2.0 or angular_vel > 5.0:
-            return True
+        #if linear_vel > 2.0 or angular_vel > 5.0:
+        #    return True
         
         # 5. 안정성 체크
         if not hasattr(self, '_instability_count'):
