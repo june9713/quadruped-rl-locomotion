@@ -1292,45 +1292,39 @@ class BipedalWalkingEnv(Go1StandingEnv):
     def _is_terminated(self):
         """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
         
-        # 1. 높이 체크 - 2족 보행 허용 범위
-        if self.data.qpos[2] < 0.35 or self.data.qpos[2] > 0.90: # 허용 범위를 0.35m ~ 0.90m로 확장
-            print(f"훈련 종료! 높이 초과: {self.data.qpos[2]}")
+        # 1. 높이 체크 - 2족 보행 허용 범위 (기존: 0.35 ~ 0.90)
+        if self.data.qpos[2] < 0.30 or self.data.qpos[2] > 0.95: # ✅ [수정] 허용 높이 범위 확장
             return True
         
         # 2. Pitch 각도 체크 - 2족 보행 허용 범위
         trunk_quat = self.data.qpos[3:7]
-        # pitch, roll, _ = self._quat_to_euler(trunk_quat) # 올바른 함수 사용
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0]) # 올바른 수식으로 수정
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
 
         # 목표 pitch: -1.5 라디안 (약 -86도)
-        # 허용 범위: -1.7 ~ -1.3 라디안
-        if pitch_angle < -1.7 or pitch_angle > -1.3:
-            print(f"훈련 종료! Pitch 각도 초과: {pitch_angle}")
+        # (기존: -1.7 ~ -1.3 라디안)
+        if pitch_angle < -1.9 or pitch_angle > -1.1: # ✅ [수정] Pitch 허용 각도 범위 확장
             return True
         
-        # 3. Roll 각도 체크 - 좌우 기울기
+        # 3. Roll 각도 체크 - 좌우 기울기 (기존: 20도)
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        if abs(roll_angle) > np.deg2rad(20):  # 20도 이상 기울면 종료
-            print(f"훈련 종료! Roll 각도 초과: {roll_angle}")
+        if abs(roll_angle) > np.deg2rad(30):  # ✅ [수정] Roll 허용 각도를 30도로 확장
             return True
         
-        # 4. 속도 체크
+        # 4. 속도 체크 (기존: linear_vel > 2.0)
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 2.0 or angular_vel > 5.0:
-            print(f"훈련 종료! 속도 초과: {linear_vel}, {angular_vel}")
+        if linear_vel > 2.5 or angular_vel > 6.0: # ✅ [수정] 선속도 및 각속도 허용치 증가
             return True
         
-        # 5. 안정성 체크
+        # 5. 안정성 체크 (수정 없음)
         if not hasattr(self, '_instability_count'):
             self._instability_count = 0
             
         if self._is_unstable():
             self._instability_count += 1
-            if self._instability_count > 50:  # 불안정성 허용 시간 완화
-                print(f"훈련 종료! 안정성 초과: {self._instability_count}")
+            if self._instability_count > 50:
                 return True
         else:
             self._instability_count = 0
