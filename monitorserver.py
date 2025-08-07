@@ -1,6 +1,7 @@
 import threading
 import numpy as np
 import matplotlib.pyplot as plt
+from stable_baselines3 import PPO  # PPO 모델을 사용하기 위해 임포트
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 import gymnasium as gym
@@ -744,3 +745,43 @@ class VideoRecordingCallback(BaseCallback):
                 
         except Exception as e:
             print(f"❌ 비디오 녹화 실패: {str(e)}")
+
+# ======================================================================================
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 메인 실행 블록 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ======================================================================================
+if __name__ == "__main__":
+    
+    # 1. 학습에 사용할 로봇 환경 생성
+    # Go1MujocoEnv의 설정은 필요에 따라 변경할 수 있습니다.
+    env = Go1MujocoEnv()
+
+    # 2. 모니터링 콜백 인스턴스 생성 (가장 기능이 많은 EnhancedVisualCallback 사용)
+    # eval_interval_minutes: 평가 실행 간격 (분 단위)
+    # show_duration_seconds: 평가 시 한 에피소드당 시뮬레이션 시간 (초)
+    visual_callback = EnhancedVisualCallback(
+        eval_env=env, 
+        eval_interval_minutes=10,  # 10분마다 평가
+        show_duration_seconds=20   # 20초 동안 시뮬레이션
+    )
+
+    # 3. 강화학습 모델 생성 (PPO 알고리즘)
+    # policy="MlpPolicy": 다층 퍼셉트론(신경망) 정책 사용
+    # verbose=1: 학습 진행 상황을 터미널에 출력
+    model = PPO("MlpPolicy", env, verbose=1)
+
+    print("====================== 학습 시작 ======================")
+    
+    try:
+        # 4. 모델 학습 시작
+        # total_timesteps: 총 학습할 횟수(타임스텝)
+        # callback: 학습 중간에 호출할 콜백 지정
+        model.learn(
+            total_timesteps=2_000_000,
+            callback=visual_callback
+        )
+    finally:
+        # 5. 학습이 중단되거나 완료되면, 최종 분석 리포트 저장
+        print("\n====================== 학습 종료 ======================")
+        save_directory = "./training_reports"
+        visual_callback.save_detailed_analysis(save_path=save_directory)
+        print(f"최종 리포트가 '{save_directory}' 폴더에 저장되었습니다.")
