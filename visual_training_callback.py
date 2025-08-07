@@ -1,10 +1,11 @@
+#!/usr/bin/env python3
 import threading
 import numpy as np
 import matplotlib.pyplot as plt
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 import gymnasium as gym
-from collections import deque
+from collections import deque, defaultdict
 import os
 import time
 import imageio.v2 as imageio
@@ -146,17 +147,6 @@ class VisualTrainingCallback(BaseCallback):
             episode_rewards.append(episode_reward)
             episode_lengths.append(episode_length)
             print(f"    📈 보상: {episode_reward:.2f}, 길이: {episode_length}")
-
-            # 영상 저장
-            #if self.save_videos and frames:
-            #    os.makedirs("eval_videos", exist_ok=True)
-            #    filename = (f"eval_videos/eval_{self.eval_count}_ep{episode+1}_"
-            #               f"t{self.num_timesteps}_{int(time.time())}.mp4")
-            #    try:
-            #        imageio.mimsave(filename, frames, fps=30)
-            #        print(f"    💾 비디오 저장: {filename}")
-            #    except Exception as e:
-            #        print(f"    ❌ 비디오 저장 실패: {e}")
 
         # 결과 집계
         mean_r, std_r = np.mean(episode_rewards), np.std(episode_rewards)
@@ -635,7 +625,7 @@ class EnhancedVisualCallback(VisualTrainingCallback):
                        label=f'Stage {stage}')
             plt.xlabel('커리큘럼 단계')
             plt.ylabel('평균 성공률')
-            plt.title('커리큘럼 단계별 성공률')
+            plt.title('커리큘큘럼 단계별 성공률')
             plt.legend()
             
             # 스테이지 진행 시간
@@ -709,11 +699,14 @@ class VideoRecordingCallback(BaseCallback):
         return True
     
     def _record_video(self):
-        """개선된 비디오 녹화"""
+        """개선된 비디오 녹화 및 종료 원인 통계"""
         print(f"\n🎥 비디오 녹화 중... (Timestep: {self.num_timesteps:,})")
         
+        # ✅ [추가] 비디오 녹화 중 발생한 종료 원인 기록용
+        termination_counts = defaultdict(int)
+        total_terminations_in_video = 0
+        
         try:
-            # 환경 리셋
             obs = self.record_env.reset()
             frames = []
             episode_reward = 0
@@ -724,21 +717,43 @@ class VideoRecordingCallback(BaseCallback):
                 obs, reward, done, info = self.record_env.step(action)
                 episode_reward += reward[0] if isinstance(reward, np.ndarray) else reward
                 
-                # 프레임 캡처
                 frame = self.record_env.render(mode='rgb_array')
                 if isinstance(frame, list):
                     frame = frame[0]
                 frames.append(frame)
                 
-                if done[0] if isinstance(done, np.ndarray) else done:
+                is_done = done[0] if isinstance(done, np.ndarray) else done
+                if is_done:
+                    # ✅ [추가] 에피소드 종료 시 원인 집계
+                    current_info = info[0] if isinstance(info, list) else info
+                    reason = current_info.get('termination_reason')
+                    if reason and reason != 'not_terminated':
+                        termination_counts[reason] += 1
+                        total_terminations_in_video += 1
+                    
                     obs = self.record_env.reset()
             
-            # 비디오 저장
             if frames:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"{self.video_folder}/training_t{self.num_timesteps}_r{episode_reward:.0f}_{timestamp}.mp4"
                 imageio.mimsave(filename, frames, fps=30)
                 print(f"✅ 비디오 저장: {filename} (보상: {episode_reward:.1f})")
+
+            # ✅ [추가] 녹화 기간 동안의 종료 원인 통계 출력
+            if total_terminations_in_video > 0:
+                print("-----------------------------------------")
+                print("| Termination Reasons (During Video)    |")
+                print(f"| Total terminations: {total_terminations_in_video:<16} |")
+                print("-----------------------------------------")
                 
+                sorted_reasons = sorted(termination_counts.items(), key=lambda item: item[1], reverse=True)
+
+                for reason, count in sorted_reasons:
+                    percentage = (count / total_terminations_in_video) * 100
+                    print(f"| {reason:<20} | {count:<8} ({percentage:5.1f}%) |")
+                print("-----------------------------------------")
+
         except Exception as e:
+            import traceback
             print(f"❌ 비디오 녹화 실패: {str(e)}")
+            traceback.print_exc()

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import time
 import threading
 import numpy as np
@@ -24,14 +25,16 @@ import torch
 import glob
 from collections import deque, defaultdict
 try:
-    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv
+    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv, RobotPhysicsUtils
 except ImportError:
     print("⚠️ go1_standing_env.py 파일이 필요합니다!")
     raise
 
 # 한글 폰트 설정
-font_name = 'Malgun Gothic'
-plt.rc('font', family=font_name)
+try:
+    plt.rc('font', family='Malgun Gothic')
+except:
+    print("Malgun Gothic 폰트가 없어 기본 폰트로 설정됩니다.")
 plt.rcParams['axes.unicode_minus'] = False
 
 
@@ -203,10 +206,10 @@ class StandingTrainingCallback(BaseCallback):
         # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
         
-        # 종료 원인 통계 추적
-        self.termination_counts = defaultdict(int)
+        # ⚠️ [제거] 전역 종료 원인 통계 추적 제거
+        # self.termination_counts = defaultdict(int)
 
-        # 수동 정보 버퍼 추가
+        # 정보 버퍼는 다른 용도로 사용될 수 있으므로 유지
         self.manual_info_buffer = deque(maxlen=args.num_envs * 2)
         
     def _get_reward_object(self, env):
@@ -223,19 +226,18 @@ class StandingTrainingCallback(BaseCallback):
         return None
         
     def _on_step(self) -> bool:
-        """매 스텝마다 호출되어 종료된 에피소드의 정보를 수동 버퍼에 저장"""
+        """매 스텝마다 호출"""
         
-        # self.locals에서 'dones'와 'infos' 정보 가져오기
         dones = self.locals.get("dones", [])
         infos = self.locals.get("infos", [])
 
+        # ⚠️ [수정] 종료 원인 집계를 위해 버퍼를 채우는 로직은 유지하되,
+        # 사용처가 없어졌으므로 향후 다른 통계에 활용될 수 있음.
         for i, done in enumerate(dones):
             if done:
-                # i번째 환경의 에피소드가 종료되었으면, 해당 info를 수동 버퍼에 추가
-                # deepcopy를 사용하여 원본 info가 변경되지 않도록 보장
                 self.manual_info_buffer.append(copy.deepcopy(infos[i]))
 
-        # 기존의 체크포인트 저장 로직
+        # 체크포인트 저장 로직
         if (self.num_timesteps - self.last_checkpoint >= self.args.checkpoint_interval):
             self._save_checkpoint()
             self.last_checkpoint = self.num_timesteps
@@ -243,18 +245,14 @@ class StandingTrainingCallback(BaseCallback):
         return True
     
     def _on_rollout_end(self) -> bool:
-        """롤아웃 종료 시 통계 출력 (수동 버퍼 사용)"""
+        """롤아웃 종료 시 통계 출력"""
         
-        # 종료 원인 집계 (수동 버퍼를 사용하도록 변경)
-        for info in self.manual_info_buffer:
-            reason = info.get('termination_reason')
-            if reason and reason != 'not_terminated':
-                self.termination_counts[reason] += 1
+        # ⚠️ [제거] 전역 종료 원인 집계 로직 제거
         
-        # 통계 집계 후 다음 롤아웃을 위해 수동 버퍼 비우기
+        # 버퍼는 비움
         self.manual_info_buffer.clear()
         
-        # 기존 성능 평가 로직 (변경 없음)
+        # 기존 성능 평가 로직
         if len(self.locals.get('episode_rewards', [])) > 0:
             recent_rewards = self.locals['episode_rewards'][-10:]
             mean_reward = np.mean(recent_rewards)
@@ -267,11 +265,10 @@ class StandingTrainingCallback(BaseCallback):
             else:
                 self.no_improvement_steps += self.args.n_steps * self.args.num_envs
         
-        # 통계 수집 및 출력
+        # 기타 통계 수집 및 출력
         self._log_upside_down_statistics()
         
-        # 종료 원인 통계 출력
-        self._log_termination_statistics()
+        # ⚠️ [제거] 종료 원인 통계 출력 함수 호출 제거
         
         # 조기 정지 확인
         if (self.args.early_stopping and 
@@ -281,28 +278,7 @@ class StandingTrainingCallback(BaseCallback):
             
         return True
 
-    def _log_termination_statistics(self):
-        """에피소드 종료 원인 통계 로깅 및 출력"""
-        total_terminations = sum(self.termination_counts.values())
-        if total_terminations > 0:
-            print("-----------------------------------------")
-            print("| Termination Reasons Breakdown         |")
-            print(f"| Total terminations: {total_terminations:<16} |")
-            print("-----------------------------------------")
-            
-            # 횟수 기준으로 정렬하여 가독성 향상
-            sorted_reasons = sorted(self.termination_counts.items(), key=lambda item: item[1], reverse=True)
-
-            for reason, count in sorted_reasons:
-                percentage = (count / total_terminations) * 100
-                print(f"| {reason:<20} | {count:<8} ({percentage:5.1f}%) |")
-            print("-----------------------------------------")
-
-            # TensorBoard에도 로깅
-            if hasattr(self.logger, 'record'):
-                self.logger.record("custom/total_terminations", total_terminations)
-                for reason, count in self.termination_counts.items():
-                    self.logger.record(f"termination_reason/{reason}_percent", (count / total_terminations) * 100)
+    # ⚠️ [제거] _log_termination_statistics 메서드 전체 제거
 
     def _log_upside_down_statistics(self):
         """통계 로깅 - 환경별 보상 객체 호환"""
@@ -407,7 +383,6 @@ def train_with_optimized_parameters(args):
     print(f"  - 조기 정지: {'사용' if args.early_stopping else '미사용'}")
     
     # ✅ 랜덤성 강도 설정 추가
-    from go1_standing_env import RobotPhysicsUtils
     
     # 명령행 인수에서 랜덤성 강도 가져오기
     randomness_intensity = args.randomness_intensity
