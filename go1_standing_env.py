@@ -629,12 +629,18 @@ class BipedWalkingReward:
             'com_alignment': 12.0,       # 무게중심을 뒷다리 쪽으로 정렬
             'stability': 7.0,            # 안정적으로 균형 유지
             
+            # ✅ [추가] 동적 균형 잡기를 위한 새로운 보상 가중치
+            'corrective_movement': 8.0,
+
             'front_feet_up': 10.0,
             'survival_bonus': 5.0,
 
             # --- 안정화 및 페널티 (Stabilization & Penalties) ---
             'angular_vel_penalty': -0.05,
-            'horizontal_vel_penalty': -0.04,
+            
+            # ✅ [수정] 수평 이동 페널티 비활성화 (0.0으로 설정)
+            'horizontal_vel_penalty': 0.0, 
+            
             'action_rate_penalty': -0.01,
             'energy_penalty': -0.005,
             'joint_limit_penalty': -2.0,
@@ -700,13 +706,32 @@ class BipedWalkingReward:
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
 
+        # ✅ [추가] 동적 균형 보상 (넘어지는 방향으로 움직여 균형잡기)
+        pitch_angular_vel = data.qvel[4]  # Y축(pitch) 기준 각속도
+        forward_vel = data.qvel[0]        # X축(전진/후진) 기준 선속도
+
+        # 넘어지려는 경향성 파악 (임계값 0.1 rad/s 이상일 때만)
+        forward_fall_tendency = np.clip(pitch_angular_vel - 0.1, 0, 1)  # 앞으로 기울어지는 경향 (0~1)
+        backward_fall_tendency = np.clip(-pitch_angular_vel - 0.1, 0, 1) # 뒤로 기울어지는 경향 (0~1)
+
+        # 올바른 방향으로 움직이는지 확인
+        corrective_forward_move = np.clip(forward_vel, 0, 1) # 앞으로 움직임 (0~1)
+        corrective_backward_move = np.clip(-forward_vel, 0, 1) # 뒤로 움직임 (0~1)
+
+        # 최종 보상 계산: (앞으로 넘어질때 앞으로 움직임) + (뒤로 넘어질때 뒤로 움직임)
+        corrective_movement_reward = (forward_fall_tendency * corrective_forward_move) + \
+                                     (backward_fall_tendency * corrective_backward_move)
+        
+        total_reward += self.weights['corrective_movement'] * corrective_movement_reward
+        reward_info['reward_corrective_movement'] = self.weights['corrective_movement'] * corrective_movement_reward
+
         # --- 3. 페널티 (Negative Rewards) ---
         # [페널티] 과도한 상체 회전 속도
         angular_vel_penalty = np.sum(np.square(data.qvel[3:6]))
         total_reward += self.weights['angular_vel_penalty'] * angular_vel_penalty
         reward_info['penalty_angular_vel'] = self.weights['angular_vel_penalty'] * angular_vel_penalty
         
-        # [페널티] 불필요한 수평 이동
+        # [페널티] 불필요한 수평 이동 (현재 가중치가 0이라 비활성화됨)
         horizontal_vel_penalty = np.sum(np.square(data.qvel[:2]))
         total_reward += self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
         reward_info['penalty_horizontal_vel'] = self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
@@ -740,9 +765,6 @@ class BipedWalkingReward:
         scuff_penalty = np.sum(front_feet_h_vel * (np.array(front_feet_heights) < 0.05))
         total_reward += self.weights['foot_scuff_penalty'] * scuff_penalty
         reward_info['penalty_foot_scuff'] = self.weights['foot_scuff_penalty'] * scuff_penalty
-
-        # [수정] max(0, total_reward)를 제거하여 음수 페널티가 에이전트에 전달되도록 함
-        # total_reward = max(0, total_reward) # <- 이 줄을 제거하거나 주석 처리
 
         return total_reward, reward_info
 
@@ -1335,7 +1357,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 2.5 or angular_vel > 6.0:
+        # ✅ [수정] 선속도 제한을 2.5 -> 4.0 으로 완화하여 동적 움직임 허용
+        if linear_vel > 4.0 or angular_vel > 6.0:
             return True, "excessive_velocity"
         
         # 5. 안정성 체크
