@@ -22,6 +22,7 @@ import pandas as pd
 from visual_training_callback import VisualTrainingCallback, VideoRecordingCallback, EnhancedVisualCallback
 import torch
 import glob
+from collections import deque, defaultdict
 try:
     from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv
 except ImportError:
@@ -202,6 +203,9 @@ class StandingTrainingCallback(BaseCallback):
         # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
         
+        # 종료 원인 통계 추적 (추가된 부분)
+        self.termination_counts = defaultdict(int)
+        
     def _get_reward_object(self, env):
         """환경에서 적절한 보상 객체 찾기"""
         if hasattr(env, 'bipedal_reward'):
@@ -227,6 +231,12 @@ class StandingTrainingCallback(BaseCallback):
     def _on_rollout_end(self) -> bool:
         """롤아웃 종료 시 통계 출력"""
         
+        # 종료 원인 집계 (추가된 부분)
+        for info in self.model.ep_info_buffer:
+            reason = info.get('termination_reason')
+            if reason and reason != 'not_terminated':
+                self.termination_counts[reason] += 1
+        
         # 기존 성능 평가 로직
         if len(self.locals.get('episode_rewards', [])) > 0:
             recent_rewards = self.locals['episode_rewards'][-10:]
@@ -244,6 +254,9 @@ class StandingTrainingCallback(BaseCallback):
         # 통계 수집 및 출력
         self._log_upside_down_statistics()
         
+        # 종료 원인 통계 출력 (추가된 부분)
+        self._log_termination_statistics()
+        
         # 조기 정지 확인
         if (self.args.early_stopping and 
             self.no_improvement_steps > self.patience):
@@ -251,6 +264,29 @@ class StandingTrainingCallback(BaseCallback):
             return False
             
         return True
+
+    def _log_termination_statistics(self):
+        """에피소드 종료 원인 통계 로깅 및 출력"""
+        total_terminations = sum(self.termination_counts.values())
+        if total_terminations > 0:
+            print("-----------------------------------------")
+            print("| Termination Reasons Breakdown         |")
+            print(f"| Total terminations: {total_terminations:<16} |")
+            print("-----------------------------------------")
+            
+            # 횟수 기준으로 정렬하여 가독성 향상
+            sorted_reasons = sorted(self.termination_counts.items(), key=lambda item: item[1], reverse=True)
+
+            for reason, count in sorted_reasons:
+                percentage = (count / total_terminations) * 100
+                print(f"| {reason:<20} | {count:<8} ({percentage:5.1f}%) |")
+            print("-----------------------------------------")
+
+            # TensorBoard에도 로깅
+            if hasattr(self.logger, 'record'):
+                self.logger.record("custom/total_terminations", total_terminations)
+                for reason, count in self.termination_counts.items():
+                    self.logger.record(f"termination_reason/{reason}_percent", (count / total_terminations) * 100)
 
     def _log_upside_down_statistics(self):
         """통계 로깅 - 환경별 보상 객체 호환"""

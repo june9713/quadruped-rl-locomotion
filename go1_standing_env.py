@@ -1283,7 +1283,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action)
 
-        terminated = self._is_terminated()
+        terminated, reason = self._is_terminated()  # 수정된 부분
         truncated = self.episode_length >= self.max_episode_length
 
         self.episode_length += 1
@@ -1297,62 +1297,56 @@ class BipedalWalkingEnv(Go1StandingEnv):
             'episode_length': self.episode_length,
             'bipedal_reward': reward,
             'bipedal_success': self._is_bipedal_success(),
+            'termination_reason': reason if terminated else None,  # 추가된 부분
             **reward_info
         }
 
         return obs, reward, terminated, truncated, info
 
     def _is_terminated(self):
-        """2족 보행용 종료 조건 (2족 자세에 맞게 수정)"""
+        """2족 보행용 종료 조건 (종료 원인 반환 기능 추가)"""
         
-        # 1. 높이 체크 - 2족 보행 허용 범위 (기존: 0.35 ~ 0.90)
-        if self.data.qpos[2] < 0.30 or self.data.qpos[2] > 0.95: # ✅ [수정] 허용 높이 범위 확장
-            #print(f"훈련 종료! 높이 초과: {self.data.qpos[2]}")
-            return True
+        # 1. 높이 체크
+        if self.data.qpos[2] < 0.30 or self.data.qpos[2] > 0.95:
+            return True, "height_out_of_range"
         
         # 2. 기울기 체크
         trunk_quat = self.data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
         
-        # [수정] pitch와 roll 각도를 계산하고 '도(degree)' 단위로 변환합니다.
         pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
         roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
         
         pitch_angle_deg = np.rad2deg(pitch_angle)
         roll_angle_deg = np.rad2deg(roll_angle)
         
-        # 목표 pitch: 약 -86도. 허용 범위를 -109도 ~ -63도로 설정 (기존 -1.9 ~ -1.1 라디안)
         pitch_range = 50
-        if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range): # ✅ [수정] Pitch 허용 각도 범위를 '도' 단위로 변경
-            #print(f"훈련 종료! Pitch 각도(도) 초과: {pitch_angle_deg}")
-            return True
+        if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
+            return True, "pitch_out_of_range"
         
-        # Roll 허용 각도를 50도로 설정
-        if abs(roll_angle_deg) > 50 or abs(roll_angle_deg) < -50:
-            #print(f"훈련 종료! Roll 각도(도) 초과: {roll_angle_deg}")
-            return True
+        # Roll 허용 각도를 50도로 설정 (기존 코드의 논리 오류 수정)
+        if abs(roll_angle_deg) > 50:
+            return True, "roll_out_of_range"
         
-        # 4. 속도 체크 (기존: linear_vel > 2.0)
+        # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
-        if linear_vel > 2.5 or angular_vel > 6.0: # ✅ [수정] 선속도 및 각속도 허용치 증가
-            #print(f"훈련 종료! 속도 초과: {linear_vel}, {angular_vel}")
-            return True
+        if linear_vel > 2.5 or angular_vel > 6.0:
+            return True, "excessive_velocity"
         
-        # 5. 안정성 체크 (수정 없음)
+        # 5. 안정성 체크
         if not hasattr(self, '_instability_count'):
             self._instability_count = 0
             
         if self._is_unstable():
             self._instability_count += 1
             if self._instability_count > 50:
-                #print(f"훈련 종료! 안정성 초과: {self._instability_count}")
-                return True
+                return True, "instability"
         else:
             self._instability_count = 0
         
-        return False
+        return False, "not_terminated"
 
     def _is_unstable(self):
         """불안정 상태 판정"""
