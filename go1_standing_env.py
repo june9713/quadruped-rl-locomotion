@@ -1283,7 +1283,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action)
 
-        #_is_terminated의 반환값을 두 변수로 받음
+        # _is_terminated의 반환값을 두 변수로 받음
         terminated, reason = self._is_terminated()
         truncated = self.episode_length >= self.max_episode_length
 
@@ -1294,11 +1294,11 @@ class BipedalWalkingEnv(Go1StandingEnv):
         else:
             self.total_timesteps = 1
 
+        # 'terminated'가 True일 때만 reason을, 아니면 None을 할당하는 부분!
         info = {
             'episode_length': self.episode_length,
             'bipedal_reward': reward,
             'bipedal_success': self._is_bipedal_success(),
-            # 'terminated'가 True일 때만 reason을, 아니면 None을 할당
             'termination_reason': reason if terminated else None,
             **reward_info
         }
