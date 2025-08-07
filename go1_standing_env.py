@@ -626,25 +626,25 @@ class BipedWalkingReward:
             'height': 8.0,
             
             # ✅ [수정] 새로운 보상 가중치 추가
-            'com_alignment': 12.0,       # 무게중심을 뒷다리 쪽으로 정렬
-            'stability': 7.0,            # 안정적으로 균형 유지
+            'com_alignment': 0.0,       # 무게중심을 뒷다리 쪽으로 정렬
+            'stability': 0.0,            # 안정적으로 균형 유지
             
             # ✅ [추가] 동적 균형 잡기를 위한 새로운 보상 가중치
-            'corrective_movement': 8.0,
+            'corrective_movement': 20.0,
 
-            'front_feet_up': 10.0,
-            'survival_bonus': 5.0,
+            'front_feet_up': 0.0,
+            'survival_bonus': 20.0,
 
             # --- 안정화 및 페널티 (Stabilization & Penalties) ---
-            'angular_vel_penalty': -0.05,
+            'angular_vel_penalty': 0.0,
             
             # ✅ [수정] 수평 이동 페널티 비활성화 (0.0으로 설정)
             'horizontal_vel_penalty': 0.0, 
             
             'action_rate_penalty': -0.01,
             'energy_penalty': -0.005,
-            'joint_limit_penalty': -2.0,
-            'foot_scuff_penalty': -3.0
+            'joint_limit_penalty': 0.0,
+            'foot_scuff_penalty': 0.0
         }
         # 이전 액션 저장을 위한 변수
         self._last_action = None
