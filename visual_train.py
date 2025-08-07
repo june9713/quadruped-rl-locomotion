@@ -203,8 +203,11 @@ class StandingTrainingCallback(BaseCallback):
         # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
         
-        # 종료 원인 통계 추적 (추가된 부분)
+        # 종료 원인 통계 추적
         self.termination_counts = defaultdict(int)
+
+        # 수동 정보 버퍼 추가
+        self.manual_info_buffer = deque(maxlen=args.num_envs * 2)
         
     def _get_reward_object(self, env):
         """환경에서 적절한 보상 객체 찾기"""
@@ -220,8 +223,19 @@ class StandingTrainingCallback(BaseCallback):
         return None
         
     def _on_step(self) -> bool:
-        """매 스텝마다 호출"""
-        # 체크포인트 저장
+        """매 스텝마다 호출되어 종료된 에피소드의 정보를 수동 버퍼에 저장"""
+        
+        # self.locals에서 'dones'와 'infos' 정보 가져오기
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+
+        for i, done in enumerate(dones):
+            if done:
+                # i번째 환경의 에피소드가 종료되었으면, 해당 info를 수동 버퍼에 추가
+                # deepcopy를 사용하여 원본 info가 변경되지 않도록 보장
+                self.manual_info_buffer.append(copy.deepcopy(infos[i]))
+
+        # 기존의 체크포인트 저장 로직
         if (self.num_timesteps - self.last_checkpoint >= self.args.checkpoint_interval):
             self._save_checkpoint()
             self.last_checkpoint = self.num_timesteps
@@ -229,35 +243,23 @@ class StandingTrainingCallback(BaseCallback):
         return True
     
     def _on_rollout_end(self) -> bool:
-        """롤아웃 종료 시 통계 출력"""
-        # ==================== 디버깅용 출력 (문제 해결 후 삭제) ====================
-        if self.model.ep_info_buffer:
-            print("\n\n[DEBUG] ep_info_buffer의 첫 3개 내용:")
-            for i, info in enumerate(self.model.ep_info_buffer):
-                if i < 3:
-                     print(f"  - 에피소드 {i}: {info}")
-            print("[DEBUG] 위 딕셔너리 안에 'termination_reason' 키가 있는지 확인하세요.\n")
-        # =======================================================================
-
-        # 종료 원인 집계
-        for info in self.model.ep_info_buffer:
+        """롤아웃 종료 시 통계 출력 (수동 버퍼 사용)"""
+        
+        # 종료 원인 집계 (수동 버퍼를 사용하도록 변경)
+        for info in self.manual_info_buffer:
             reason = info.get('termination_reason')
             if reason and reason != 'not_terminated':
                 self.termination_counts[reason] += 1
         
-        # 종료 원인 집계 (추가된 부분)
-        for info in self.model.ep_info_buffer:
-            reason = info.get('termination_reason')
-            if reason and reason != 'not_terminated':
-                self.termination_counts[reason] += 1
+        # 통계 집계 후 다음 롤아웃을 위해 수동 버퍼 비우기
+        self.manual_info_buffer.clear()
         
-        # 기존 성능 평가 로직
+        # 기존 성능 평가 로직 (변경 없음)
         if len(self.locals.get('episode_rewards', [])) > 0:
             recent_rewards = self.locals['episode_rewards'][-10:]
             mean_reward = np.mean(recent_rewards)
             self.episode_rewards.extend(recent_rewards)
             
-            # 개선 추적
             if mean_reward > self.best_reward:
                 self.best_reward = mean_reward
                 self.no_improvement_steps = 0
@@ -268,7 +270,7 @@ class StandingTrainingCallback(BaseCallback):
         # 통계 수집 및 출력
         self._log_upside_down_statistics()
         
-        # 종료 원인 통계 출력 (추가된 부분)
+        # 종료 원인 통계 출력
         self._log_termination_statistics()
         
         # 조기 정지 확인

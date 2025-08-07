@@ -1305,6 +1305,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         return obs, reward, terminated, truncated, info
 
+        
     def _is_terminated(self):
         """2족 보행용 종료 조건 (종료 원인 반환 기능 추가)"""
         
