@@ -1283,7 +1283,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action)
 
-        terminated, reason = self._is_terminated()  # 수정된 부분
+        #_is_terminated의 반환값을 두 변수로 받음
+        terminated, reason = self._is_terminated()
         truncated = self.episode_length >= self.max_episode_length
 
         self.episode_length += 1
@@ -1297,7 +1298,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
             'episode_length': self.episode_length,
             'bipedal_reward': reward,
             'bipedal_success': self._is_bipedal_success(),
-            'termination_reason': reason if terminated else None,  # 추가된 부분
+            # 'terminated'가 True일 때만 reason을, 아니면 None을 할당
+            'termination_reason': reason if terminated else None,
             **reward_info
         }
 
@@ -1324,7 +1326,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
             return True, "pitch_out_of_range"
         
-        # Roll 허용 각도를 50도로 설정 (기존 코드의 논리 오류 수정)
+        # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
         if abs(roll_angle_deg) > 50:
             return True, "roll_out_of_range"
         

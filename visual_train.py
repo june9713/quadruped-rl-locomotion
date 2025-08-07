@@ -230,6 +230,20 @@ class StandingTrainingCallback(BaseCallback):
     
     def _on_rollout_end(self) -> bool:
         """롤아웃 종료 시 통계 출력"""
+        # ==================== 디버깅용 출력 (문제 해결 후 삭제) ====================
+        if self.model.ep_info_buffer:
+            print("\n\n[DEBUG] ep_info_buffer의 첫 3개 내용:")
+            for i, info in enumerate(self.model.ep_info_buffer):
+                if i < 3:
+                     print(f"  - 에피소드 {i}: {info}")
+            print("[DEBUG] 위 딕셔너리 안에 'termination_reason' 키가 있는지 확인하세요.\n")
+        # =======================================================================
+
+        # 종료 원인 집계
+        for info in self.model.ep_info_buffer:
+            reason = info.get('termination_reason')
+            if reason and reason != 'not_terminated':
+                self.termination_counts[reason] += 1
         
         # 종료 원인 집계 (추가된 부분)
         for info in self.model.ep_info_buffer:
