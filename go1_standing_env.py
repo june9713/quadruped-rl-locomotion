@@ -1345,7 +1345,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         pitch_angle_deg = np.rad2deg(pitch_angle)
         roll_angle_deg = np.rad2deg(roll_angle)
         
-        pitch_range = 50
+        pitch_range = 90
         if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
             return True, "pitch_out_of_range"
         
