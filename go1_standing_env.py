@@ -1350,7 +1350,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
             return True, "pitch_out_of_range"
         
         # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
-        if abs(roll_angle_deg) > 50:
+        if abs(roll_angle_deg) > 90:
             return True, "roll_out_of_range"
         
         # 4. 속도 체크
