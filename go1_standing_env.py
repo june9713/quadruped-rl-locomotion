@@ -619,22 +619,26 @@ class QuadWalkingReward:
 class BipedWalkingReward:
     """
     2족 보행을 위한 보상 함수 (동적 보행 및 넘어짐 방지 강화 버전)
-    - 불안정한 상황을 감지하여 상체 비틀기, 자세 낮추기 등
-      균형 회복 동작을 수행하도록 적극적으로 유도합니다.
     """
     
     def __init__(self):
-        # --- 보상 가중치 재설계 ---
+        # --- [수정] 보상 가중치 재설계 ---
         self.weights = {
-            'forward_velocity': 2.5,
+            'forward_velocity': 1.5,           # 가중치 약간 감소
             'stepping': 2.0,
             'com_over_stance_foot': 1.5,
-            'corrective_twist': 1.8,
-            'crouch_to_stabilize': 1.2,
-            'survival_bonus': 1.5,
+            'survival_bonus': 1.0,             # [수정] 생존 보너스 감소 (가만히 있는 것보다 행동 유도)
             'torso_upright': 1.0,
-            'height': 1.0,
-            'front_feet_up': 0.5,
+            'height': 0.5,                     # [수정] 높이 보상 가중치 소폭 감소
+            
+            # --- 핵심 수정 사항 ---
+            'front_feet_up': 4.0,              # ✅ [수정] 앞다리 들기 보상 대폭 상향 (기존 0.5 -> 4.0)
+            'front_leg_contact_penalty': -3.0, # ✅ [신규] 앞다리 접촉 페널티
+            
+            # --- 상충되는 보상 제거 ---
+            # 'corrective_twist': 1.8,         # [제거] 복잡성을 줄이기 위해 일단 주석 처리
+            # 'crouch_to_stabilize': 1.2,      # [제거] ❌ 의도와 다른 행동을 유발하므로 제거
+
             'energy_penalty': -0.005,
             'action_rate_penalty': -0.01,
             'joint_limit_penalty': -2.0,
@@ -642,9 +646,6 @@ class BipedWalkingReward:
             'both_feet_on_ground': -1.0,
         }
         
-        # --- 보행 상태 추적을 위한 변수 ---
-
-
         self._last_action = None
         self.target_forward_velocity = 0.4
         self.base_target_height = 0.48
@@ -670,54 +671,22 @@ class BipedWalkingReward:
         rear_feet_contact_states = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         rear_feet_positions_xy = RobotPhysicsUtils.get_rear_feet_positions(model, data)
 
-        # ✅ [신규] 현재 로봇의 불안정성 측정
-        instability = np.linalg.norm(data.qvel[3:5])
-
-        # ✅ [신규] 현재 로봇의 불안정성 측정 (좌우/앞뒤 기울어지는 속도)
-        # qvel[3]: roll(좌우) 각속도, qvel[4]: pitch(앞뒤) 각속도
-        instability = np.linalg.norm(data.qvel[3:5])
-
-        # --- 2. ✅ [신규] 넘어짐 방지 보상 ---
-        
-        # [보상] 상체 비틀기 (Corrective Torso Twist)
-        # 옆으로 기울 때(roll_vel), 허리를 반대로 비틀면(yaw_vel) 보상
-        roll_vel = data.qvel[3] # 좌우 기울기 속도
-        yaw_vel = data.qvel[5]  # 몸통 회전 속도
-        
-        # roll_vel과 yaw_vel의 부호가 반대일 때 양수가 되어 보상이 됨
-        # (예: 오른쪽으로 기울 때(roll +), 몸통을 왼쪽으로 비틀면(yaw -) -> 보상)
-        corrective_twist_reward = -roll_vel * yaw_vel
-        
-        # 불안정성이 클 때만 이 보상을 적용 (임계값 0.5)
-        twist_activation = np.clip(instability - 0.5, 0, 1)
-        corrective_twist_reward *= twist_activation
-        
-        total_reward += self.weights['corrective_twist'] * corrective_twist_reward
-        reward_info['reward_corrective_twist'] = self.weights['corrective_twist'] * corrective_twist_reward
+        # --- 2. ✅ [신규] 앞다리 접촉 페널티 계산 ---
+        # 앞다리(FR, FL)의 접촉 상태를 가져옵니다.
+        front_contacts = RobotPhysicsUtils.get_foot_contacts(model, data)[:2] 
+        front_leg_contact_penalty = np.sum(front_contacts) * self.weights['front_leg_contact_penalty']
+        total_reward += front_leg_contact_penalty
+        reward_info['penalty_front_leg_contact'] = front_leg_contact_penalty
 
         # --- 3. 핵심 보행 및 자세 보상 ---
 
-        # [보상] 목표 높이 유지 (✅ [수정] 불안정할 때 자세 낮추기 포함)
-        # 불안정할수록 목표 높이를 동적으로 낮춰 웅크리도록 유도
-        crouch_depth = 0.1  # 불안정할 때 최대 10cm 낮춤
-        height_activation = np.clip(instability - 0.8, 0, 1.5)
-        dynamic_target_height = self.base_target_height - crouch_depth * height_activation
-        
-        height_error = abs(trunk_height - dynamic_target_height)
+        # [수정] 목표 높이 유지 (웅크리기 보상 제거)
+        height_error = abs(trunk_height - self.base_target_height)
         height_reward = np.exp(-15 * height_error)
-        
-        # 자세를 낮추는 행동 자체에 추가 보상
-        crouch_reward = np.exp(-10 * (trunk_height - (self.base_target_height - crouch_depth)))
-        crouch_reward *= height_activation
-
         total_reward += self.weights['height'] * height_reward
-        total_reward += self.weights['crouch_to_stabilize'] * crouch_reward
         reward_info['reward_height'] = self.weights['height'] * height_reward
-        reward_info['reward_crouch_to_stabilize'] = self.weights['crouch_to_stabilize'] * crouch_reward
-        
-        # (이하 기존 보상 함수 코드와 대부분 동일)
 
-        # [보상 1] 목표 전진 속도 유지 (Forward Velocity)
+        # [보상 1] 목표 전진 속도 유지
         current_forward_vel = data.qvel[0]
         vel_error = abs(current_forward_vel - self.target_forward_velocity)
         forward_vel_reward = np.exp(-5.0 * vel_error)
@@ -726,7 +695,7 @@ class BipedWalkingReward:
         total_reward += self.weights['forward_velocity'] * forward_reward
         reward_info['reward_forward_velocity'] = self.weights['forward_velocity'] * forward_reward
 
-        # [보상 2] 리드미컬한 발걸음 (Stepping Reward)
+        # [보상 2] 리드미컬한 발걸음
         contact_filter = rear_feet_contact_states > 0.1
         first_contact = (self.rear_feet_air_time > 0.0) & contact_filter
         self.rear_feet_air_time += dt
@@ -736,7 +705,7 @@ class BipedWalkingReward:
         total_reward += self.weights['stepping'] * stepping_reward
         reward_info['reward_stepping'] = self.weights['stepping'] * stepping_reward
 
-        # [보상 3] 무게중심 이동 (CoM over Stance Foot)
+        # [보상 3] 무게중심 이동
         com_stability_reward = 0.0
         num_contacts = np.sum(rear_feet_contact_states)
         if num_contacts == 1:
@@ -755,8 +724,10 @@ class BipedWalkingReward:
         total_reward += self.weights['torso_upright'] * upright_reward
         reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
 
+        # ✅ [수정] 앞다리 들기 보상 (가중치 상향 적용)
         avg_front_feet_height = np.mean(front_feet_heights)
-        front_feet_reward = np.tanh(avg_front_feet_height / 0.15)
+        # tanh의 스케일을 0.15 -> 0.20으로 조정하여 더 높은 보상을 얻도록 유도
+        front_feet_reward = np.tanh(avg_front_feet_height / 0.20)
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
         
