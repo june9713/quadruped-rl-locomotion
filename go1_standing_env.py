@@ -40,8 +40,8 @@ class RobotPhysicsUtils:
         0.0, 2.0, -0.6,    # FR
         0.0, 2.0, -0.0,    # FL
         # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태  
-        0.0, 2.3, -1.0,     # RR
-        0.0, 2.3, -1.0,     # RL
+        0.0, 2.5, -1.0,     # RR
+        0.0, 2.5, -1.0,     # RL
     ])
 
     @classmethod
@@ -991,7 +991,7 @@ class Go1StandingEnv(Go1MujocoEnv):
         RobotPhysicsUtils.apply_random_height(self.data, base_height=0.62, config=config)
         
         # 자세 랜덤화 (2족용 pitch)
-        RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=-1.5, config=config)
+        RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=-1.95, config=config)
         
         # 관절 랜덤화 (2족용)
         base_joints = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
@@ -1458,7 +1458,7 @@ class BipedalCurriculumEnv(BipedalWalkingEnv):
         elif self.curriculum_stage == 2:
             # Stage 2: 반직립 자세
             self.target_height = 0.55
-            self.target_pitch = -1.2  # 약 -69도
+            self.target_pitch = -2.0  # 약 -69도
             self.front_feet_target = 0.12
             self.stability_threshold = 3.0
             
