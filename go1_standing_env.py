@@ -631,9 +631,11 @@ class BipedWalkingReward:
             'height': 0.5,
             'front_feet_up': 4.0,
             'front_leg_contact_penalty': -3.0,
-            
-            # ✅ [신규] 뒷다리 정강이 접촉 페널티 가중치
             'rear_calf_contact_penalty': -2.5,
+
+            # ✅ [신규] 정강이 수평 페널티 가중치
+            'rear_calf_horizontal_penalty': -2.0,
+            'high_angular_velocity_penalty': -0.1,
 
             'energy_penalty': -0.005,
             'action_rate_penalty': -0.01,
@@ -649,20 +651,32 @@ class BipedWalkingReward:
         self.last_rear_feet_contact = np.zeros(2)
         self.time_both_rear_feet_on_ground = 0.0
 
-        # ✅ [신규] 정강이 geom ID를 저장할 변수 (초기화)
+        # 정강이 geom 및 body ID를 저장할 변수
         self.calf_geom_ids = None
+        # ✅ [신규] 정강이 body ID를 저장할 변수
+        self.calf_body_ids = None
 
     def compute_reward(self, model, data, action, dt):
         """2족 보행 보상 계산 (동적 보행 및 넘어짐 방지 강화)"""
         total_reward = 0.0
         reward_info = {}
 
-        # ✅ [신규] 첫 실행 시, XML에 추가한 geom들의 ID를 찾아 저장 (효율성)
+        # 첫 실행 시, 필요한 ID들을 찾아 저장 (효율성)
         if self.calf_geom_ids is None:
             calf_geom_names = ["RR_calf_geom1", "RR_calf_geom2", "RL_calf_geom1", "RL_calf_geom2"]
             self.calf_geom_ids = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in calf_geom_names}
+        
+        # ✅ [신규] 첫 실행 시, 정강이 body ID 찾아 저장
+        if self.calf_body_ids is None:
+            calf_body_names = ["RR_calf", "RL_calf"]
+            self.calf_body_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in calf_body_names]
 
+        # ✅ [신규] 높은 각속도 페널티 계산
+        angular_velocity_penalty = np.sum(np.square(data.qvel[3:5])) * self.weights['high_angular_velocity_penalty']
+        total_reward += angular_velocity_penalty
+        reward_info['penalty_high_angular_velocity'] = angular_velocity_penalty
         # --- 주요 물리량 사전 계산 ---
+        # (이전과 동일)
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
         up_vector = trunk_rotation_matrix[:, 2]
@@ -672,20 +686,20 @@ class BipedWalkingReward:
         rear_feet_contact_states = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         rear_feet_positions_xy = RobotPhysicsUtils.get_rear_feet_positions(model, data)
 
+
         # --- 페널티 계산 ---
 
-        # [신규] 앞다리 접촉 페널티
+        # 앞다리 접촉 페널티
         front_contacts = RobotPhysicsUtils.get_foot_contacts(model, data)[:2] 
         front_leg_contact_penalty = np.sum(front_contacts) * self.weights['front_leg_contact_penalty']
         total_reward += front_leg_contact_penalty
         reward_info['penalty_front_leg_contact'] = front_leg_contact_penalty
 
-        # ✅ [신규] 뒷다리 정강이 접촉 페널티 계산 로직
+        # 뒷다리 정강이 접촉 페널티
         calf_contact_count = 0
-        ground_geom_id = 0 # 보통 바닥의 geom ID는 0입니다.
+        ground_geom_id = 0
         for i in range(data.ncon):
             contact = data.contact[i]
-            # 한쪽이 정강이 ID이고, 다른 한쪽이 바닥 ID인지 확인
             geom1_is_calf = contact.geom1 in self.calf_geom_ids
             geom2_is_calf = contact.geom2 in self.calf_geom_ids
             geom1_is_ground = contact.geom1 == ground_geom_id
@@ -698,7 +712,23 @@ class BipedWalkingReward:
         total_reward += rear_calf_penalty
         reward_info['penalty_rear_calf_contact'] = rear_calf_penalty
 
-        # --- (이하 나머지 보상 및 페널티 계산은 이전 답변과 동일) ---
+        # ✅ [신규] 정강이 수평 각도 페널티 계산 로직
+        horizontal_penalty = 0.0
+        for body_id in self.calf_body_ids:
+            # 해당 body의 회전 행렬을 가져옴
+            rot_matrix = data.xmat[body_id].reshape(3, 3)
+            # body의 로컬 Y축(일반적으로 길쭉한 방향)이 월드 좌표계에서 어떤 방향인지 계산
+            # 이 벡터의 Z성분(rot_matrix[2, 1])을 사용
+            y_axis_z_in_world = rot_matrix[2, 1]
+            # Z성분의 절댓값이 0에 가까울수록(수평) 페널티를 크게, 1에 가까울수록(수직) 작게 부여
+            penalty_for_leg = (1.0 - abs(y_axis_z_in_world))**2
+            horizontal_penalty += penalty_for_leg
+        
+        final_horizontal_penalty = horizontal_penalty * self.weights['rear_calf_horizontal_penalty']
+        total_reward += final_horizontal_penalty
+        reward_info['penalty_rear_calf_horizontal'] = final_horizontal_penalty
+
+        # --- (이하 나머지 보상 계산은 이전과 동일) ---
         
         height_error = abs(trunk_height - self.base_target_height)
         height_reward = np.exp(-15 * height_error)
@@ -744,6 +774,7 @@ class BipedWalkingReward:
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
         
+        # ... (이하 나머지 페널티 계산도 이전과 동일)
         if num_contacts == 2:
             self.time_both_rear_feet_on_ground += dt
         else:
@@ -1347,67 +1378,38 @@ class BipedalWalkingEnv(Go1StandingEnv):
         return obs, reward, terminated, truncated, info
 
         
+    # BipedalWalkingEnv 클래스 내부
     def _is_terminated(self):
-        """2족 보행용 종료 조건 (종료 원인 반환 기능 추가)"""
+        """2족 보행용 종료 조건 (instability 체크 제거)"""
         
-        # 1. 높이 체크
-        # ✅ [수정] 높이 하한을 0.40m -> 0.35m 로 완화합니다.
-        # 이렇게 하면 로봇이 균형을 잡기 위해 순간적으로 자세를 낮추는
-        # 행동(최저 약 0.38m)을 했을 때 에피소드가 종료되지 않습니다.
-        if self.data.qpos[2] < 0.35:
+        # 1. 높이 체크 (완화된 값 0.25m 유지)
+        if self.data.qpos[2] < 0.25:
             return True, "height_too_low"
         
-        # 2. 기울기 체크
+        # 2. 기울기 체크 (유지)
         trunk_quat = self.data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
+        up_vector = trunk_rotation_matrix[:, 2]
+        roll_angle = np.arcsin(np.clip(up_vector[1], -1.0, 1.0))
+        if abs(np.rad2deg(roll_angle)) > 50:
+            return True, "roll_out_of_range"
         
         pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
-        roll_angle = np.arctan2(trunk_rotation_matrix[2, 1], trunk_rotation_matrix[2, 2])
-        
         pitch_angle_deg = np.rad2deg(pitch_angle)
-        roll_angle_deg = np.rad2deg(roll_angle)
-        
-        pitch_range = 50#도로
+        pitch_range = 50
         if pitch_angle_deg < (-111.7 - pitch_range) or pitch_angle_deg > ( -111.7 + pitch_range):
             return True, "pitch_out_of_range"
         
-        # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
-        # --- [수정 시작] ---
-        # 기존의 arctan2를 사용한 roll 계산은 피치 각도가 -90도에 가까울 때 발생하는
-        # 짐벌락 문제에 취약하여 비정상적인 값을 반환할 수 있습니다.
-        # 이를 해결하기 위해, 로봇의 위쪽 방향 벡터(Z축)를 이용해 물리적인 좌우 기울기를 직접 계산합니다.
-
-        up_vector = trunk_rotation_matrix[:, 2]  # 로봇 몸통의 Z축 벡터 (월드 좌표계 기준)
-
-        # 로봇이 옆으로 기울면 up_vector의 y성분이 변합니다. 이 y성분을 arcsin에 넣어 기울기 각도를 계산합니다.
-        # 부동 소수점 오류로 인해 arcsin의 입력값이 [-1, 1] 범위를 벗어나는 것을 방지하기 위해 np.clip을 사용합니다.
-        roll_angle = np.arcsin(np.clip(up_vector[1], -1.0, 1.0))
-        roll_angle_deg = np.rad2deg(roll_angle)
-        # --- [수정 끝] ---
-        if abs(roll_angle_deg) > 50:
-            return True, "roll_out_of_range"
-        
-        # 4. 속도 체크
+        # 3. 속도 체크 (유지)
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        
-        # ✅ [수정] 선속도 제한을 2.5 -> 4.0 으로 완화하여 동적 움직임 허용
         if linear_vel > 10.0 or angular_vel > 10.0:
             return True, "excessive_velocity"
         
-        # 5. 안정성 체크
-        if not hasattr(self, '_instability_count'):
-            self._instability_count = 0
-            
-        if self._is_unstable():
-            self._instability_count += 1
-            if self._instability_count > 50:
-                return True, "instability"
-        else:
-            self._instability_count = 0
+        # 4. [제거] instability 체크 로직 전체 삭제
+        # if not hasattr(self, '_instability_count'): ... 이 부분 전체 제거
         
-        # ✅ [개선] 진전 없음(No Progress) 체크
-        # 100 스텝 동안 x축 이동 거리가 5cm 미만이면 진전이 없는 것으로 간주
+        # 5. 진전 없음 체크 (유지)
         if self.episode_length % 100 == 0:
             if abs(self.data.qpos[0] - self._last_x_position) < 0.05:
                 self._no_progress_steps += 1
@@ -1415,7 +1417,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
                 self._no_progress_steps = 0
             self._last_x_position = self.data.qpos[0]
 
-        if self._no_progress_steps >= 3: # 300 스텝(약 3초) 동안 진전이 없으면 종료
+        if self._no_progress_steps >= 3:
             return True, "no_progress"
             
         return False, "not_terminated"
