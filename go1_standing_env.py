@@ -626,22 +626,15 @@ class BipedWalkingReward:
     def __init__(self):
         # --- 보상 가중치 재설계 ---
         self.weights = {
-            # === 핵심 보행 유도 보상 ===
             'forward_velocity': 2.5,
             'stepping': 2.0,
             'com_over_stance_foot': 1.5,
-            
-            # ✅ [신규] 넘어짐 방지 전략 보상
-            'corrective_twist': 1.8,    # 상체 비틀기 보상
-            'crouch_to_stabilize': 1.2, # 불안정할 때 자세 낮추기 보상
-
-            # === 기본 자세 및 생존 보상 ===
+            'corrective_twist': 1.8,
+            'crouch_to_stabilize': 1.2,
             'survival_bonus': 1.5,
             'torso_upright': 1.0,
             'height': 1.0,
             'front_feet_up': 0.5,
-
-            # === 페널티 ===
             'energy_penalty': -0.005,
             'action_rate_penalty': -0.01,
             'joint_limit_penalty': -2.0,
@@ -650,15 +643,16 @@ class BipedWalkingReward:
         }
         
         # --- 보행 상태 추적을 위한 변수 ---
+
+
         self._last_action = None
         self.target_forward_velocity = 0.4
-        self.base_target_height = 0.48 # ✅ [수정] 기본 목표 높이
-        
+        self.base_target_height = 0.48
         self.rear_feet_air_time = np.zeros(2)
         self.last_rear_feet_contact = np.zeros(2)
         self.time_both_rear_feet_on_ground = 0.0
 
-    def compute_reward(self, model, data, action):
+    def compute_reward(self, model, data, action, dt):
         """2족 보행 보상 계산 (동적 보행 및 넘어짐 방지 강화)"""
         total_reward = 0.0
         reward_info = {}
@@ -675,6 +669,9 @@ class BipedWalkingReward:
         
         rear_feet_contact_states = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         rear_feet_positions_xy = RobotPhysicsUtils.get_rear_feet_positions(model, data)
+
+        # ✅ [신규] 현재 로봇의 불안정성 측정
+        instability = np.linalg.norm(data.qvel[3:5])
 
         # ✅ [신규] 현재 로봇의 불안정성 측정 (좌우/앞뒤 기울어지는 속도)
         # qvel[3]: roll(좌우) 각속도, qvel[4]: pitch(앞뒤) 각속도
@@ -732,7 +729,7 @@ class BipedWalkingReward:
         # [보상 2] 리드미컬한 발걸음 (Stepping Reward)
         contact_filter = rear_feet_contact_states > 0.1
         first_contact = (self.rear_feet_air_time > 0.0) & contact_filter
-        self.rear_feet_air_time += self.dt
+        self.rear_feet_air_time += dt
         stride_time = np.clip(self.rear_feet_air_time, 0.1, 0.4)
         stepping_reward = np.sum(stride_time * first_contact)
         self.rear_feet_air_time[contact_filter] = 0.0
@@ -765,7 +762,7 @@ class BipedWalkingReward:
         
         # --- 5. 페널티 (Negative Rewards) ---
         if num_contacts == 2:
-            self.time_both_rear_feet_on_ground += self.dt
+            self.time_both_rear_feet_on_ground += dt
         else:
             self.time_both_rear_feet_on_ground = 0.0
         
@@ -1342,7 +1339,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
 
         obs = self._get_obs()
 
-        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action)
+        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action, self.dt)
 
         # _is_terminated의 반환값을 두 변수로 받음
         terminated, reason = self._is_terminated()
