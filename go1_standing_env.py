@@ -23,7 +23,7 @@ __all__ = ['Go1StandingEnv', 'GradualStandingEnv', 'QuadWalkingReward',
 class RobotPhysicsUtils:
     """로봇 물리 계산을 위한 공통 유틸리티 클래스"""
 
-    GLOBAL_RANDOMNESS_INTENSITY = 0.18  # 기본값 1.0 (0.0 = 랜덤성 없음, 2.0 = 2배 강화)
+    GLOBAL_RANDOMNESS_INTENSITY = 0.0  # 기본값 1.0 (0.0 = 랜덤성 없음, 2.0 = 2배 강화)
 
     # 공통 관절 각도 상수들
     NATURAL_STANDING_JOINTS = np.array([
@@ -37,11 +37,11 @@ class RobotPhysicsUtils:
     
     BIPEDAL_READY_JOINTS = np.array([
         # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
-        0.0, 1.0, -0.6,    # FR
-        0.0, 1.0, -0.0,    # FL
+        0.0, 2.0, -0.6,    # FR
+        0.0, 2.0, -0.0,    # FL
         # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태  
-        0.0, 2.0, -1.0,     # RR
-        0.0, 2.0, -1.0,     # RL
+        0.0, 2.3, -1.0,     # RR
+        0.0, 2.3, -1.0,     # RL
     ])
 
     @classmethod
