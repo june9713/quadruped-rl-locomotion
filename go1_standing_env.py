@@ -1345,13 +1345,13 @@ class BipedalWalkingEnv(Go1StandingEnv):
         pitch_angle_deg = np.rad2deg(pitch_angle)
         roll_angle_deg = np.rad2deg(roll_angle)
         
-        pitch_range = 90
-        if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
-            return True, "pitch_out_of_range"
+        #pitch_range = 90
+        #if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
+        #    return True, "pitch_out_of_range"
         
         # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
-        if abs(roll_angle_deg) > 90:
-            return True, "roll_out_of_range"
+        #if abs(roll_angle_deg) > 90:
+        #    return True, "roll_out_of_range"
         
         # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
