@@ -1389,6 +1389,18 @@ class BipedalWalkingEnv(Go1StandingEnv):
             return True, "pitch_out_of_range"
         
         # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
+        # --- [수정 시작] ---
+        # 기존의 arctan2를 사용한 roll 계산은 피치 각도가 -90도에 가까울 때 발생하는
+        # 짐벌락 문제에 취약하여 비정상적인 값을 반환할 수 있습니다.
+        # 이를 해결하기 위해, 로봇의 위쪽 방향 벡터(Z축)를 이용해 물리적인 좌우 기울기를 직접 계산합니다.
+
+        up_vector = trunk_rotation_matrix[:, 2]  # 로봇 몸통의 Z축 벡터 (월드 좌표계 기준)
+
+        # 로봇이 옆으로 기울면 up_vector의 y성분이 변합니다. 이 y성분을 arcsin에 넣어 기울기 각도를 계산합니다.
+        # 부동 소수점 오류로 인해 arcsin의 입력값이 [-1, 1] 범위를 벗어나는 것을 방지하기 위해 np.clip을 사용합니다.
+        roll_angle = np.arcsin(np.clip(up_vector[1], -1.0, 1.0))
+        roll_angle_deg = np.rad2deg(roll_angle)
+        # --- [수정 끝] ---
         if abs(roll_angle_deg) > 50:
             return True, "roll_out_of_range"
         
