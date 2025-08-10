@@ -617,41 +617,51 @@ class QuadWalkingReward:
 
 
 class BipedWalkingReward:
-    """2족 보행을 위한 보상 함수"""
+    """
+    2족 보행을 위한 보상 함수 (동적 보행 유도 버전)
+    - 전진 운동, 리드미컬한 발걸음, 무게 중심 이동을 적극적으로 보상하여
+      정적 균형이 아닌 동적 보행을 학습하도록 설계되었습니다.
+    """
     
     def __init__(self):
+        # --- 보상 가중치 재설계 ---
         self.weights = {
-            # --- 핵심 성공 요소 (Key Success Factors) ---
-            'torso_upright': 1.0,
-            'height': 1.0,
+            # === 핵심 보행 유도 보상 ===
+            'forward_velocity': 2.5,        # (신규) 목표 전진 속도 유지 보상
+            'stepping': 2.0,                # (신규) 리드미컬한 발걸음 보상
+            'com_over_stance_foot': 1.5,    # (신규) 지지발 위로 무게중심 이동 보상
             
-            # ✅ [수정] 새로운 보상 가중치 추가
-            'com_alignment': 0.0,       # 무게중심을 뒷다리 쪽으로 정렬
-            'stability': 0.0,            # 안정적으로 균형 유지
-            
-            # ✅ [추가] 동적 균형 잡기를 위한 새로운 보상 가중치
-            'corrective_movement': 2.0,
+            # === 기본 자세 및 생존 보상 ===
+            'survival_bonus': 1.5,          # 생존 보너스 (약간 감소)
+            'torso_upright': 1.0,           # 상체 직립 유지 (필수)
+            'height': 1.0,                  # 목표 높이 유지 (필수)
+            'front_feet_up': 0.5,           # 앞발 들기 (활성화)
 
-            'front_feet_up': 0.0,
-            'survival_bonus': 3.0,
-
-            # --- 안정화 및 페널티 (Stabilization & Penalties) ---
-            'angular_vel_penalty': 0.1,
+            # === 페널티 (움직임을 장려하는 방향으로 조정) ===
+            'energy_penalty': -0.005,       # 에너지 페널티 (과도한 토크 방지)
+            'action_rate_penalty': -0.01,   # 액션 변화율 페널티 (부드러운 움직임 유도)
+            'joint_limit_penalty': -2.0,    # 관절 한계 페널티 (강화하여 로봇 보호)
+            'foot_scuff_penalty': -0.5,     # 발 쓸림 페널티 (앞발이 땅에 끌리는 것 방지)
+            'both_feet_on_ground': -1.0,    # (신규) 양 뒷발이 땅에 오래 머무는 것 방지
             
-            # ✅ [수정] 수평 이동 페널티 비활성화 (0.0으로 설정)
-            'horizontal_vel_penalty': 2.0, 
-            
-            'action_rate_penalty': -0.01,
-            'energy_penalty': 0.5,
-            'joint_limit_penalty': -0.05,
-            'foot_scuff_penalty': -0.01
+            # (제거) 아래 페널티들은 동적 보행에 방해가 되므로 제거하거나 비활성화합니다.
+            # 'horizontal_vel_penalty': 0.0, # 전진을 방해하므로 제거
+            # 'angular_vel_penalty': 0.0     # 보행 시 자연스러운 회전을 허용하기 위해 제거
         }
-        # 이전 액션 저장을 위한 변수
+        
+        # --- 보행 상태 추적을 위한 변수 ---
         self._last_action = None
-
+        self.target_forward_velocity = 0.4  # 목표 전진 속도 (m/s)
+        
+        # 뒷발의 공중 체류 시간 및 접촉 상태 추적
+        self.rear_feet_air_time = np.zeros(2) # [RR, RL]
+        self.last_rear_feet_contact = np.zeros(2)
+        
+        # 양발이 모두 땅에 닿아 있었던 시간
+        self.time_both_rear_feet_on_ground = 0.0
 
     def compute_reward(self, model, data, action):
-        """2족 보행 보상 계산 (개선된 버전)"""
+        """2족 보행 보상 계산 (동적 보행 유도)"""
         total_reward = 0.0
         reward_info = {}
 
@@ -661,106 +671,116 @@ class BipedWalkingReward:
         up_vector = trunk_rotation_matrix[:, 2]
         
         trunk_height = data.qpos[2]
-        com_position = RobotPhysicsUtils.get_com_position(model, data)
+        com_position_xy = RobotPhysicsUtils.get_com_position(model, data)[:2]
         
         front_feet_heights = RobotPhysicsUtils.get_front_feet_heights(model, data)
-        rear_feet_positions = RobotPhysicsUtils.get_rear_feet_positions(model, data)
         
-        angular_velocity = np.linalg.norm(data.qvel[3:6])
+        # 뒷발 관련 정보 계산
+        rear_feet_contact_states = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data)) # [RR, RL]
+        rear_feet_positions_xy = RobotPhysicsUtils.get_rear_feet_positions(model, data) # [[x,y], [x,y]]
 
-        # --- 2. 핵심 보상 (Positive Rewards) ---
+        # --- 2. 핵심 보행 유도 보상 (Positive Rewards) ---
 
-        # [보상] 생존 보너스
-        survival_reward = self.weights['survival_bonus']
-        total_reward += survival_reward
-        reward_info['reward_survival'] = survival_reward
+        # [보상 1] 목표 전진 속도 유지 (Forward Velocity)
+        current_forward_vel = data.qvel[0]
+        vel_error = abs(current_forward_vel - self.target_forward_velocity)
+        forward_vel_reward = np.exp(-5.0 * vel_error)
+        
+        # 옆으로 움직이는 것에 대한 페널티는 유지
+        lateral_vel_penalty = np.square(data.qvel[1])
+        forward_reward = forward_vel_reward - 0.5 * lateral_vel_penalty
+        
+        total_reward += self.weights['forward_velocity'] * forward_reward
+        reward_info['reward_forward_velocity'] = self.weights['forward_velocity'] * forward_reward
 
-        # [보상] 상체 직립
+        # [보상 2] 리드미컬한 발걸음 (Stepping Reward)
+        # 현재 발 접촉 상태 (1.0 = 접촉, 0.0 = 공중)
+        contact_filter = rear_feet_contact_states > 0.1
+        
+        # 공중에 떠 있던 발이 처음으로 땅에 닿는 순간을 감지
+        first_contact = (self.rear_feet_air_time > 0.0) & contact_filter
+        
+        # 모든 뒷발의 공중 체류 시간 업데이트
+        self.rear_feet_air_time += self.dt
+
+        # 발걸음(stride)을 막 완료한 발에 보상
+        # 0.1초 ~ 0.4초 사이의 공중 체류 시간을 장려
+        stride_time = np.clip(self.rear_feet_air_time, 0.1, 0.4)
+        stepping_reward = np.sum(stride_time * first_contact)
+        
+        # 땅에 닿은 발의 공중 체류 시간 초기화
+        self.rear_feet_air_time[contact_filter] = 0.0
+        
+        total_reward += self.weights['stepping'] * stepping_reward
+        reward_info['reward_stepping'] = self.weights['stepping'] * stepping_reward
+
+        # [보상 3] 무게중심 이동 (CoM over Stance Foot)
+        com_stability_reward = 0.0
+        num_contacts = np.sum(rear_feet_contact_states)
+        
+        if num_contacts == 1: # 한 발로만 지지하고 있을 때
+            stance_foot_idx = np.argmax(rear_feet_contact_states)
+            stance_foot_pos = rear_feet_positions_xy[stance_foot_idx]
+            
+            # 무게중심과 지지발 사이의 거리 오차
+            com_error = np.linalg.norm(com_position_xy - stance_foot_pos)
+            com_stability_reward = np.exp(-20.0 * com_error)
+        
+        total_reward += self.weights['com_over_stance_foot'] * com_stability_reward
+        reward_info['reward_com_stability'] = self.weights['com_over_stance_foot'] * com_stability_reward
+        
+        # --- 3. 기본 자세 및 생존 보상 ---
+        total_reward += self.weights['survival_bonus']
+        reward_info['reward_survival'] = self.weights['survival_bonus']
+        
         upright_reward = up_vector[2]
         total_reward += self.weights['torso_upright'] * upright_reward
         reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
 
-        # [보상] 목표 높이 유지
         target_height = 0.48
         height_error = abs(trunk_height - target_height)
         height_reward = np.exp(-15 * height_error)
         total_reward += self.weights['height'] * height_reward
         reward_info['reward_height'] = height_reward * self.weights['height']
 
-        # ✅ [추가 보상 1] 무게중심 정렬 (일어서기 준비 동작)
-        support_center_x = np.mean([pos[0] for pos in rear_feet_positions])
-        com_x = com_position[0]
-        alignment_error = abs(com_x - support_center_x)
-        com_alignment_reward = np.exp(-25 * alignment_error)
-        total_reward += self.weights['com_alignment'] * com_alignment_reward
-        reward_info['reward_com_alignment'] = com_alignment_reward * self.weights['com_alignment']
-        
-        # ✅ [추가 보상 2] 안정성 (낮은 각속도 유지)
-        stability_reward = np.exp(-2.0 * angular_velocity)
-        total_reward += self.weights['stability'] * stability_reward
-        reward_info['reward_stability'] = stability_reward * self.weights['stability']
-        
-        # [보상] 앞발 들기
         avg_front_feet_height = np.mean(front_feet_heights)
         front_feet_reward = np.tanh(avg_front_feet_height / 0.15)
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
-
-        # ✅ [추가] 동적 균형 보상 (넘어지는 방향으로 움직여 균형잡기)
-        pitch_angular_vel = data.qvel[4]  # Y축(pitch) 기준 각속도
-        forward_vel = data.qvel[0]        # X축(전진/후진) 기준 선속도
-
-        # 넘어지려는 경향성 파악 (임계값 0.1 rad/s 이상일 때만)
-        forward_fall_tendency = np.clip(pitch_angular_vel - 0.1, 0, 1)  # 앞으로 기울어지는 경향 (0~1)
-        backward_fall_tendency = np.clip(-pitch_angular_vel - 0.1, 0, 1) # 뒤로 기울어지는 경향 (0~1)
-
-        # 올바른 방향으로 움직이는지 확인
-        corrective_forward_move = np.clip(forward_vel, 0, 1) # 앞으로 움직임 (0~1)
-        corrective_backward_move = np.clip(-forward_vel, 0, 1) # 뒤로 움직임 (0~1)
-
-        # 최종 보상 계산: (앞으로 넘어질때 앞으로 움직임) + (뒤로 넘어질때 뒤로 움직임)
-        corrective_movement_reward = (forward_fall_tendency * corrective_forward_move) + \
-                                     (backward_fall_tendency * corrective_backward_move)
         
-        total_reward += self.weights['corrective_movement'] * corrective_movement_reward
-        reward_info['reward_corrective_movement'] = self.weights['corrective_movement'] * corrective_movement_reward
+        # --- 4. 페널티 (Negative Rewards) ---
 
-        # --- 3. 페널티 (Negative Rewards) ---
-        # [페널티] 과도한 상체 회전 속도
-        angular_vel_penalty = np.sum(np.square(data.qvel[3:6]))
-        total_reward += self.weights['angular_vel_penalty'] * angular_vel_penalty
-        reward_info['penalty_angular_vel'] = self.weights['angular_vel_penalty'] * angular_vel_penalty
+        # [페널티] 양 뒷발이 모두 땅에 닿아 있는 상태 방지
+        if num_contacts == 2:
+            self.time_both_rear_feet_on_ground += self.dt
+        else:
+            self.time_both_rear_feet_on_ground = 0.0
         
-        # [페널티] 불필요한 수평 이동 (현재 가중치가 0이라 비활성화됨)
-        horizontal_vel_penalty = np.sum(np.square(data.qvel[:2]))
-        total_reward += self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
-        reward_info['penalty_horizontal_vel'] = self.weights['horizontal_vel_penalty'] * horizontal_vel_penalty
-        
-        # [페널티] 액션 변화율
+        # 0.2초 이상 양발이 땅에 있으면 페널티
+        both_feet_ground_penalty = -np.clip(self.time_both_rear_feet_on_ground - 0.2, 0, 1)
+        total_reward += self.weights['both_feet_on_ground'] * both_feet_ground_penalty
+        reward_info['penalty_both_feet_on_ground'] = self.weights['both_feet_on_ground'] * both_feet_ground_penalty
+
+        # [페널티] 에너지, 액션 변화율, 관절 한계 등
+        energy_penalty = np.sum(np.square(data.ctrl))
+        total_reward += self.weights['energy_penalty'] * energy_penalty
+        reward_info['penalty_energy'] = self.weights['energy_penalty'] * energy_penalty
+
         if self._last_action is not None:
             action_rate_penalty = np.sum(np.square(action - self._last_action))
             total_reward += self.weights['action_rate_penalty'] * action_rate_penalty
             reward_info['penalty_action_rate'] = self.weights['action_rate_penalty'] * action_rate_penalty
         self._last_action = action
 
-        # [페널티] 에너지
-        energy_penalty = np.sum(np.square(data.ctrl))
-        total_reward += self.weights['energy_penalty'] * energy_penalty
-        reward_info['penalty_energy'] = self.weights['energy_penalty'] * energy_penalty
-
-        # [페널티] 관절 한계
         joint_pos = data.qpos[7:]
         joint_ranges = model.jnt_range[1:]
         limit_penalty = 0.0
         for i, pos in enumerate(joint_pos):
-            if pos < joint_ranges[i, 0] * 0.95:
-                limit_penalty += (joint_ranges[i, 0] - pos)**2
-            elif pos > joint_ranges[i, 1] * 0.95:
-                limit_penalty += (pos - joint_ranges[i, 1])**2
+            if pos < joint_ranges[i, 0] * 0.95 or pos > joint_ranges[i, 1] * 0.95:
+                limit_penalty += 1.0
         total_reward += self.weights['joint_limit_penalty'] * limit_penalty
         reward_info['penalty_joint_limit'] = self.weights['joint_limit_penalty'] * limit_penalty
         
-        # [페널티] 앞발 쓸림
         front_feet_h_vel = RobotPhysicsUtils.get_front_feet_horizontal_velocities(model, data)
         scuff_penalty = np.sum(front_feet_h_vel * (np.array(front_feet_heights) < 0.05))
         total_reward += self.weights['foot_scuff_penalty'] * scuff_penalty
@@ -1345,13 +1365,13 @@ class BipedalWalkingEnv(Go1StandingEnv):
         pitch_angle_deg = np.rad2deg(pitch_angle)
         roll_angle_deg = np.rad2deg(roll_angle)
         
-        #pitch_range = 90
-        #if pitch_angle_deg < (-90 - pitch_range) or pitch_angle_deg > (-90 + pitch_range):
-        #    return True, "pitch_out_of_range"
+        pitch_range = 50#도로
+        if pitch_angle_deg < (-111.7 - pitch_range) or pitch_angle_deg > ( -111.7 + pitch_range):
+            return True, "pitch_out_of_range"
         
         # Roll 허용 각도를 50도로 설정 (논리 오류 수정)
-        #if abs(roll_angle_deg) > 90:
-        #    return True, "roll_out_of_range"
+        if abs(roll_angle_deg) > 50:
+            return True, "roll_out_of_range"
         
         # 4. 속도 체크
         linear_vel = np.linalg.norm(self.data.qvel[:3])
