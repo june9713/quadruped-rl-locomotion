@@ -1332,7 +1332,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (종료 원인 반환 기능 추가)"""
         
         # 1. 높이 체크
-        if self.data.qpos[2] < 0.30:
+        if self.data.qpos[2] < 0.40:
             return True, "height_out_of_range"
         
         # 2. 기울기 체크
