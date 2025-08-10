@@ -622,22 +622,18 @@ class BipedWalkingReward:
     """
     
     def __init__(self):
-        # --- [수정] 보상 가중치 재설계 ---
         self.weights = {
-            'forward_velocity': 1.5,           # 가중치 약간 감소
+            'forward_velocity': 1.5,
             'stepping': 2.0,
             'com_over_stance_foot': 1.5,
-            'survival_bonus': 1.0,             # [수정] 생존 보너스 감소 (가만히 있는 것보다 행동 유도)
+            'survival_bonus': 1.0,
             'torso_upright': 1.0,
-            'height': 0.5,                     # [수정] 높이 보상 가중치 소폭 감소
+            'height': 0.5,
+            'front_feet_up': 4.0,
+            'front_leg_contact_penalty': -3.0,
             
-            # --- 핵심 수정 사항 ---
-            'front_feet_up': 4.0,              # ✅ [수정] 앞다리 들기 보상 대폭 상향 (기존 0.5 -> 4.0)
-            'front_leg_contact_penalty': -3.0, # ✅ [신규] 앞다리 접촉 페널티
-            
-            # --- 상충되는 보상 제거 ---
-            # 'corrective_twist': 1.8,         # [제거] 복잡성을 줄이기 위해 일단 주석 처리
-            # 'crouch_to_stabilize': 1.2,      # [제거] ❌ 의도와 다른 행동을 유발하므로 제거
+            # ✅ [신규] 뒷다리 정강이 접촉 페널티 가중치
+            'rear_calf_contact_penalty': -2.5,
 
             'energy_penalty': -0.005,
             'action_rate_penalty': -0.01,
@@ -653,40 +649,62 @@ class BipedWalkingReward:
         self.last_rear_feet_contact = np.zeros(2)
         self.time_both_rear_feet_on_ground = 0.0
 
+        # ✅ [신규] 정강이 geom ID를 저장할 변수 (초기화)
+        self.calf_geom_ids = None
+
     def compute_reward(self, model, data, action, dt):
         """2족 보행 보상 계산 (동적 보행 및 넘어짐 방지 강화)"""
         total_reward = 0.0
         reward_info = {}
 
-        # --- 1. 주요 물리량 사전 계산 ---
+        # ✅ [신규] 첫 실행 시, XML에 추가한 geom들의 ID를 찾아 저장 (효율성)
+        if self.calf_geom_ids is None:
+            calf_geom_names = ["RR_calf_geom1", "RR_calf_geom2", "RL_calf_geom1", "RL_calf_geom2"]
+            self.calf_geom_ids = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in calf_geom_names}
+
+        # --- 주요 물리량 사전 계산 ---
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
         up_vector = trunk_rotation_matrix[:, 2]
-        
         trunk_height = data.qpos[2]
         com_position_xy = RobotPhysicsUtils.get_com_position(model, data)[:2]
-        
         front_feet_heights = RobotPhysicsUtils.get_front_feet_heights(model, data)
-        
         rear_feet_contact_states = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         rear_feet_positions_xy = RobotPhysicsUtils.get_rear_feet_positions(model, data)
 
-        # --- 2. ✅ [신규] 앞다리 접촉 페널티 계산 ---
-        # 앞다리(FR, FL)의 접촉 상태를 가져옵니다.
+        # --- 페널티 계산 ---
+
+        # [신규] 앞다리 접촉 페널티
         front_contacts = RobotPhysicsUtils.get_foot_contacts(model, data)[:2] 
         front_leg_contact_penalty = np.sum(front_contacts) * self.weights['front_leg_contact_penalty']
         total_reward += front_leg_contact_penalty
         reward_info['penalty_front_leg_contact'] = front_leg_contact_penalty
 
-        # --- 3. 핵심 보행 및 자세 보상 ---
+        # ✅ [신규] 뒷다리 정강이 접촉 페널티 계산 로직
+        calf_contact_count = 0
+        ground_geom_id = 0 # 보통 바닥의 geom ID는 0입니다.
+        for i in range(data.ncon):
+            contact = data.contact[i]
+            # 한쪽이 정강이 ID이고, 다른 한쪽이 바닥 ID인지 확인
+            geom1_is_calf = contact.geom1 in self.calf_geom_ids
+            geom2_is_calf = contact.geom2 in self.calf_geom_ids
+            geom1_is_ground = contact.geom1 == ground_geom_id
+            geom2_is_ground = contact.geom2 == ground_geom_id
 
-        # [수정] 목표 높이 유지 (웅크리기 보상 제거)
+            if (geom1_is_calf and geom2_is_ground) or (geom2_is_calf and geom1_is_ground):
+                calf_contact_count += 1
+        
+        rear_calf_penalty = calf_contact_count * self.weights['rear_calf_contact_penalty']
+        total_reward += rear_calf_penalty
+        reward_info['penalty_rear_calf_contact'] = rear_calf_penalty
+
+        # --- (이하 나머지 보상 및 페널티 계산은 이전 답변과 동일) ---
+        
         height_error = abs(trunk_height - self.base_target_height)
         height_reward = np.exp(-15 * height_error)
         total_reward += self.weights['height'] * height_reward
         reward_info['reward_height'] = self.weights['height'] * height_reward
 
-        # [보상 1] 목표 전진 속도 유지
         current_forward_vel = data.qvel[0]
         vel_error = abs(current_forward_vel - self.target_forward_velocity)
         forward_vel_reward = np.exp(-5.0 * vel_error)
@@ -695,7 +713,6 @@ class BipedWalkingReward:
         total_reward += self.weights['forward_velocity'] * forward_reward
         reward_info['reward_forward_velocity'] = self.weights['forward_velocity'] * forward_reward
 
-        # [보상 2] 리드미컬한 발걸음
         contact_filter = rear_feet_contact_states > 0.1
         first_contact = (self.rear_feet_air_time > 0.0) & contact_filter
         self.rear_feet_air_time += dt
@@ -705,7 +722,6 @@ class BipedWalkingReward:
         total_reward += self.weights['stepping'] * stepping_reward
         reward_info['reward_stepping'] = self.weights['stepping'] * stepping_reward
 
-        # [보상 3] 무게중심 이동
         com_stability_reward = 0.0
         num_contacts = np.sum(rear_feet_contact_states)
         if num_contacts == 1:
@@ -716,7 +732,6 @@ class BipedWalkingReward:
         total_reward += self.weights['com_over_stance_foot'] * com_stability_reward
         reward_info['reward_com_stability'] = self.weights['com_over_stance_foot'] * com_stability_reward
         
-        # --- 4. 기본 자세 및 생존 보상 ---
         total_reward += self.weights['survival_bonus']
         reward_info['reward_survival'] = self.weights['survival_bonus']
         
@@ -724,14 +739,11 @@ class BipedWalkingReward:
         total_reward += self.weights['torso_upright'] * upright_reward
         reward_info['reward_upright'] = upright_reward * self.weights['torso_upright']
 
-        # ✅ [수정] 앞다리 들기 보상 (가중치 상향 적용)
         avg_front_feet_height = np.mean(front_feet_heights)
-        # tanh의 스케일을 0.15 -> 0.20으로 조정하여 더 높은 보상을 얻도록 유도
         front_feet_reward = np.tanh(avg_front_feet_height / 0.20)
         total_reward += self.weights['front_feet_up'] * front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward * self.weights['front_feet_up']
         
-        # --- 5. 페널티 (Negative Rewards) ---
         if num_contacts == 2:
             self.time_both_rear_feet_on_ground += dt
         else:

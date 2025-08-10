@@ -119,8 +119,8 @@
               mass="0.195862" diaginertia="0.00149767 0.00148468 3.58427e-05"/>
             <joint class="knee" name="FR_calf_joint"/>
             <geom class="visual" mesh="calf"/>
-            <geom class="calf1"/>
-            <geom class="calf2"/>
+            <geom class="calf1" name="FR_calf_geom1"/>
+            <geom class="calf2" name="FR_calf_geom2"/>
             <geom name="FR" class="foot"/>
             <site name="FR" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
           </body>
@@ -146,8 +146,8 @@
               mass="0.195862" diaginertia="0.00149767 0.00148468 3.58427e-05"/>
             <joint class="knee" name="FL_calf_joint"/>
             <geom class="visual" mesh="calf"/>
-            <geom class="calf1"/>
-            <geom class="calf2"/>
+            <geom class="calf1" name="FL_calf_geom1"/>
+            <geom class="calf2" name="FL_calf_geom2"/>
             <geom name="FL" class="foot"/>
             <site name="FL" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
           </body>
@@ -174,8 +174,8 @@
               mass="0.195862" diaginertia="0.00149767 0.00148468 3.58427e-05"/>
             <joint class="knee" name="RR_calf_joint"/>
             <geom class="visual" mesh="calf"/>
-            <geom class="calf1"/>
-            <geom class="calf2"/>
+            <geom class="calf1" name="RR_calf_geom1"/>
+            <geom class="calf2" name="RR_calf_geom2"/>
             <geom name="RR" class="foot"/>
             <site name="RR" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
           </body>
@@ -202,8 +202,8 @@
               mass="0.195862" diaginertia="0.00149767 0.00148468 3.58427e-05"/>
             <joint class="knee" name="RL_calf_joint"/>
             <geom class="visual" mesh="calf"/>
-            <geom class="calf1"/>
-            <geom class="calf2"/>
+            <geom class="calf1" name="RL_calf_geom1"/>
+            <geom class="calf2" name="RL_calf_geom2"/>
             <geom name="RL" class="foot"/>
             <site name="RL" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
           </body>
