@@ -1358,7 +1358,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
         
         # ✅ [수정] 선속도 제한을 2.5 -> 4.0 으로 완화하여 동적 움직임 허용
-        if linear_vel > 4.0 or angular_vel > 6.0:
+        if linear_vel > 10.0 or angular_vel > 10.0:
             return True, "excessive_velocity"
         
         # 5. 안정성 체크
