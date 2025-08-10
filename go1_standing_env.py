@@ -633,13 +633,13 @@ class BipedWalkingReward:
             'corrective_movement': 2.0,
 
             'front_feet_up': 0.0,
-            'survival_bonus': 2.0,
+            'survival_bonus': 3.0,
 
             # --- 안정화 및 페널티 (Stabilization & Penalties) ---
             'angular_vel_penalty': 0.1,
             
             # ✅ [수정] 수평 이동 페널티 비활성화 (0.0으로 설정)
-            'horizontal_vel_penalty': 1.0, 
+            'horizontal_vel_penalty': 2.0, 
             
             'action_rate_penalty': -0.01,
             'energy_penalty': 0.5,
