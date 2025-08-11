@@ -450,7 +450,7 @@ def train_with_optimized_parameters(args):
         model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
         model.gamma = 0.97
         model.vf_coef = 1.0         # 💡 vf_coef 값 변경 (예: 0.5 -> 0.7)
-        model.n_epochs = 30
+        model.n_epochs = 10
         print(f"변경된 gamma 값: {model.gamma}")
         print("✅ 모델 로드 및 학습률 적용 완료.")
         
