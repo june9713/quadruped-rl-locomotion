@@ -540,7 +540,7 @@ def train_with_optimized_parameters(args):
                     return args.learning_rate
                 
                 model.learning_rate = new_lr_schedule
-        
+        print("model.learning_rate"  ,model.learning_rate)
         if hasattr(model, 'clip_range'):
             def clip_range_func(progress_remaining):
                 return args.clip_range
