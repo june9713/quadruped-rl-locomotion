@@ -140,7 +140,7 @@ class VisualTrainingCallback(BaseCallback):
                     break
 
                 if terminated or truncated:
-                    if info.get('standing_success', False):
+                    if info.get('bipedal_success', False):  # <-- 수정된 코드
                         success_count += 1
                     break
 

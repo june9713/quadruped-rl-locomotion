@@ -667,31 +667,35 @@ class BipedWalkingReward:
     """
     
     def __init__(self):
+        devider = 5.0
         self.weights = {
             # 걷기 장려
-            'forward_velocity': 1.5 / 100.0,
-            'stay_in_place': 2.0 / 100.0,  # 👈 이 줄을 추가하세요. 가중치 값은 조절 가능합니다.
-            'stepping': 2.0 / 100.0,
+            
+            'forward_velocity': 1.5 / devider,
+            'stay_in_place': 2.0 / devider,  # 👈 이 줄을 추가하세요. 가중치 값은 조절 가능합니다.
+            'stepping': 2.0 / devider,
 
             # 좋은 자세 장려
-            'survival_bonus': 0.5 / 100.0,
-            'torso_upright': 1.0 / 100.0,
-            'height_linear': 2.0 / 100.0,
-            'front_feet_up': 4.0 / 100.0,
-            'leg_extension': 1.5 / 100.0,
-            'both_feet_on_ground': 1.0 / 100.0,
+            'survival_bonus': 0.5 / devider,
+            'torso_upright': 1.0 / devider,
+            'height_linear': 2.0 / devider,
+            'front_feet_up': 4.0 / devider,
+            'leg_extension': 1.5 / devider,
+            'both_feet_on_ground': 1.0 / devider,
+
+            'torso_pitch_penalty': -4.0 / devider, 
 
             # 나쁜 자세/행동 페널티
-            'low_height_penalty': -8.0 / 100.0,
-            'knee_hip_penalty': -3.0 / 100.0,
-            'foot_knee_penalty': -3.0 / 100.0,
-            'front_leg_contact_penalty': -3.0 / 100.0,
-            'rear_calf_contact_penalty': -5.0 / 100.0,
-            'high_angular_velocity_penalty': -0.1 / 100.0,
-            'energy_penalty': -0.005 / 100.0,
-            'action_rate_penalty': -0.01 / 100.0,
-            'joint_limit_penalty': -2.0 / 100.0,
-            'foot_scuff_penalty': -0.5 / 100.0,
+            'low_height_penalty': -8.0 / devider,
+            'knee_hip_penalty': -3.0 / devider,
+            'foot_knee_penalty': -3.0 / devider,
+            'front_leg_contact_penalty': -3.0 / devider,
+            'rear_calf_contact_penalty': -5.0 / devider,
+            'high_angular_velocity_penalty': -0.1 / devider,
+            'energy_penalty': -0.005 / devider,
+            'action_rate_penalty': -0.01 / devider,
+            'joint_limit_penalty': -2.0 / devider,
+            'foot_scuff_penalty': -0.5 / devider,
         }
         
         self._last_action = None
@@ -794,6 +798,17 @@ class BipedWalkingReward:
         high_angular_velocity_penalty = np.sum(np.square(data.qvel[3:6])) * self.weights['high_angular_velocity_penalty']
         total_reward += high_angular_velocity_penalty
         reward_info['penalty_high_angular_velocity'] = high_angular_velocity_penalty
+
+        # ✅ [신규] 상체 Pitch 각도 페널티 (Torso Pitch Penalty)
+        # 목표 각도(-1.5rad)에서 크게 벗어날수록 강한 페널티 부여
+        target_pitch = -1.5
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
+        pitch_error = abs(pitch_angle - target_pitch)
+        # 0.4 라디안(약 23도) 이상 벗어나면 페널티 급증
+        pitch_penalty = (np.exp(5.0 * (pitch_error - 0.4)) - 1) * self.weights['torso_pitch_penalty']
+        if pitch_error > 0.4:
+            total_reward += pitch_penalty
+            reward_info['penalty_torso_pitch'] = pitch_penalty
 
         # (참고) 본격적인 '전진 보행' 관련 보상은 여전히 비활성화 상태입니다.
         # 이 단계에서는 제자리에서 안정성을 유지하는 것만 학습합니다.
