@@ -365,220 +365,107 @@ class StandingTrainingCallback(BaseCallback):
         self.model.save(best_path)
         print(f"🏆 최고 성능 모델 저장: {best_path} (보상: {self.best_reward:.2f}){upside_down_info}")
 
-def train_with_optimized_parameters(args):  
-    """2족 보행 최적화된 훈련 - 관찰 공간 호환성 수정"""
+def train_with_optimized_parameters(args):
+    """2족 보행 최적화 훈련 - 관찰 공간 호환성 및 학습률 수정 적용"""
     print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
     print(f"📊 최적화된 하이퍼파라미터:")
-    print(f"  - 학습률: {args.learning_rate}")
+    print(f"  - 전달된 학습률 (명령행): {args.learning_rate}")
     print(f"  - 배치 크기: {args.batch_size}")
     print(f"  - 롤아웃 스텝: {args.n_steps}")
-    print(f"  - 클립 범위: {args.clip_range}")
-    print(f"  - 엔트로피: {args.entropy_coef}")
-    print(f"  - 목표 속도: {args.target_vel} m/s")
-    print(f"  - 안정성 가중치: {args.stability_weight}")
-    print(f"  - 높이 허용오차: {args.height_tolerance}")
     print(f"  - 병렬 환경 수: {args.num_envs}")
     print(f"  - 총 훈련 스텝: {args.total_timesteps:,}")
-    print(f"  - 커리큘럼 학습: {'사용' if args.use_curriculum else '미사용'}")
-    print(f"  - 조기 정지: {'사용' if args.early_stopping else '미사용'}")
-    
-    # ✅ 랜덤성 강도 설정 추가
-    
-    # 명령행 인수에서 랜덤성 강도 가져오기
+
+    # 랜덤성 강도 설정
     randomness_intensity = args.randomness_intensity
     RobotPhysicsUtils.set_randomness_intensity(randomness_intensity)
     print(f"🎛️ 랜덤성 강도 설정: {randomness_intensity}")
-    
-    # 환경에 전달할 파라미터만 포함
-    env_kwargs = {
-        'randomize_physics': True,
-    }
-    
-    # 환경 선택
+
+    # 환경 설정
+    env_kwargs = {'randomize_physics': True}
     if args.task == "standing":
-        if args.use_curriculum:
-            env_class = GradualStandingEnv
-            print("📚 점진적 커리큘럼 환경 사용")
-        else:
-            env_class = BipedalWalkingEnv
-            print("🎯 2족 보행 환경 사용")
+        env_class = BipedalWalkingEnv
+        print("🎯 2족 보행 환경 사용")
     else:
         env_class = Go1MujocoEnv
         print("🐕 기본 4족 보행 환경 사용")
-    
-    # 사전훈련 모델 호환성 확인
-    use_pretrained = False
-    compatible_env_kwargs = env_kwargs.copy()
-    
-    if args.pretrained_model:
-        print(f"\n🔍 사전훈련 모델 호환성 확인 중...")
-        
-        # 모델 경로 확인
-        pretrained_model_path = args.pretrained_model
-        if pretrained_model_path == "latest":
-            models = glob.glob(f"./models/{args.task}*.zip")
-            if models:
-                pretrained_model_path = list(sorted(models))[-1]
-            else:
-                print("❌ 'latest' 모델을 찾을 수 없습니다.")
-                pretrained_model_path = None
-        
-        if pretrained_model_path and os.path.exists(pretrained_model_path):
-            # 임시 환경 생성해서 관찰 공간 확인
-            temp_env = env_class(**env_kwargs)
-            is_compatible = check_observation_compatibility(pretrained_model_path, temp_env)
-            temp_env.close()
-            
-            if is_compatible:
-                use_pretrained = True
-                print("✅ 사전훈련 모델 사용 가능")
-            elif args.ignore_pretrained_obs_mismatch:
-                print("⚠️ 관찰 공간 불일치를 무시하고 새 모델 생성")
-                use_pretrained = False
-            else:
-                print("❌ 관찰 공간 불일치로 인해 사전훈련 모델 사용 불가")
-                print("  해결책:")
-                print("  1. --ignore_pretrained_obs_mismatch 플래그 추가")
-                print("  2. 동일한 환경에서 훈련된 모델 사용")
-                print("  3. 사전훈련 모델 없이 새로 시작")
-                
-                # 호환 모드로 환경 설정 시도
-                print("  4. 호환 모드로 환경 설정 시도 중...")
-                try:
-                    compatible_env_kwargs['use_base_observation'] = True
-                    temp_env_compat = env_class(**compatible_env_kwargs)
-                    is_compatible_retry = check_observation_compatibility(pretrained_model_path, temp_env_compat)
-                    temp_env_compat.close()
-                    
-                    if is_compatible_retry:
-                        print("✅ 호환 모드로 설정 성공!")
-                        use_pretrained = True
-                        env_kwargs = compatible_env_kwargs  # 호환 모드 적용
-                    else:
-                        print("❌ 호환 모드로도 해결되지 않음")
-                        # 사용자 선택 대기
-                        choice = input("\n새 모델로 훈련을 계속하시겠습니까? (y/N): ").lower()
-                        if choice != 'y':
-                            print("훈련 중단")
-                            return
-                        use_pretrained = False
-                except Exception as e:
-                    print(f"⚠️ 호환 모드 설정 실패: {e}")
-                    choice = input("\n새 모델로 훈련을 계속하시겠습니까? (y/N): ").lower()
-                    if choice != 'y':
-                        print("훈련 중단")
-                        return
-                    use_pretrained = False
-        else:
-            print(f"❌ 사전훈련 모델 파일을 찾을 수 없습니다: {pretrained_model_path}")
-            use_pretrained = False
-    
-    # 학습용 환경 (병렬화) - 호환성 적용된 kwargs 사용
+
+    # 사전훈련 모델 사용 여부 결정
+    use_pretrained = args.pretrained_model and os.path.exists(args.pretrained_model)
+    pretrained_model_path = args.pretrained_model if use_pretrained else None
+
+    # 학습용/평가용 환경 생성
     print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중...")
-    vec_env = make_vec_env(
-        env_class, 
-        n_envs=args.num_envs, 
-        vec_env_cls=SubprocVecEnv,
-        env_kwargs=env_kwargs  # 호환성 설정이 적용된 kwargs
-    )
-    
-    # 평가용 환경 - 호환성 적용된 kwargs 사용
+    vec_env = make_vec_env(env_class, n_envs=args.num_envs, vec_env_cls=SubprocVecEnv, env_kwargs=env_kwargs)
     print("📊 평가 환경 생성 중...")
     eval_env = env_class(render_mode="rgb_array", **env_kwargs)
-    
+
     # 콜백 설정
     callbacks = [
-        EnhancedVisualCallback(
-            eval_env,
-            eval_interval_minutes=args.visual_interval,
-            n_eval_episodes=3,
-            show_duration_seconds=args.show_duration,
-            save_videos=args.save_videos,
-            use_curriculum=args.use_curriculum
-        ),
+        EnhancedVisualCallback(eval_env, eval_interval_minutes=args.visual_interval, n_eval_episodes=3, show_duration_seconds=args.show_duration, save_videos=args.save_videos, use_curriculum=args.use_curriculum),
         StandingTrainingCallback(args, eval_env)
     ]
-    
-    # 비디오 녹화 콜백
     if args.video_interval > 0:
         record_env = DummyVecEnv([lambda: env_class(render_mode="rgb_array", **env_kwargs)])
         callbacks.append(
-            VideoRecordingCallback(
-                record_env,
-                record_interval_timesteps=args.video_interval,
-                video_folder=f"eval_videos_{args.task}",
-                show_duration_seconds=args.show_duration
-            )
+            VideoRecordingCallback(record_env, record_interval_timesteps=args.video_interval, video_folder=f"eval_videos_{args.task}", show_duration_seconds=args.show_duration)
         )
-    
-    # 모델 생성 또는 로드
+
+    # TensorBoard 로그 경로 설정
     tensorboard_log = f"logs/{args.task}_optimized_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    print("use_pretrained"  ,use_pretrained)
+
+    # 모델 생성 또는 로드
     if use_pretrained:
-        print(f"📂 사전 훈련 모델 로드: {pretrained_model_path}")
-        model = PPO.load(pretrained_model_path, env=vec_env)
-        model.set_env(vec_env)
-        
-        # ✅ [수정] 옵티마이저의 학습률을 직접, 강제로 변경합니다.
-        # 이 방법은 스케줄러를 우회하여 즉시 값을 변경하므로 가장 확실합니다.
-        print(f"모델에 저장된 기존 학습률: {model.learning_rate}")
-        
-        # 옵티마이저의 모든 파라미터 그룹에 새로운 학습률을 직접 할당
-        for param_group in model.policy.optimizer.param_groups:
-            param_group['lr'] = args.learning_rate
-            
-        print(f"새로운 학습률로 강제 변경 완료: {model.policy.optimizer.param_groups[0]['lr']}")
-            
+        print(f"📂 사전 훈련 모델 로드 시도: {pretrained_model_path}")
+
+        # [최종 수정] PPO.load() 시점에 custom_objects를 이용해 학습률을 명확히 전달
+        custom_objects = {
+            "learning_rate": args.learning_rate
+        }
+
+        model = PPO.load(
+            pretrained_model_path,
+            env=vec_env,
+            custom_objects=custom_objects
+        )
+        print(f"✅ 모델 로드 시 새로운 학습률 적용 완료.")
+        print(f"   - 확인 1 (모델 스케줄러): {model.learning_rate}")
+        print(f"   - 확인 2 (실제 옵티마이저): {model.policy.optimizer.param_groups[0]['lr']}")
+
     else:
         print("🆕 새로운 모델 생성 중...")
         model = create_optimized_ppo_model(vec_env, args, tensorboard_log)
-    
-    # training_time 초기화
-    training_time = 0.0
-    
+
     # 학습 시작
     try:
         print(f"\n🎯 2족 보행 최적화 학습 시작...")
         print(f"📊 TensorBoard 로그: {tensorboard_log}")
-        print("💡 TensorBoard 실행: tensorboard --logdir=logs")
-        print("📈 실시간 모니터링을 위해 별도 터미널에서 TensorBoard를 실행하세요\n")
-        
+        print("💡 TensorBoard 실행: tensorboard --logdir=logs\n")
+
         start_time = time.time()
-        
         model.learn(
             total_timesteps=args.total_timesteps,
             callback=callbacks,
             progress_bar=True,
-            reset_num_timesteps=False if use_pretrained else True
+            reset_num_timesteps=not use_pretrained
         )
-        
         training_time = time.time() - start_time
         print(f"\n⏱️ 총 훈련 시간: {training_time/3600:.2f}시간")
-        
+
     except KeyboardInterrupt:
         training_time = time.time() - start_time if 'start_time' in locals() else 0.0
         print(f"\n⏹️ 사용자 중단 - 현재 상태 저장 중... (진행 시간: {training_time/3600:.2f}시간)")
     except Exception as e:
         training_time = time.time() - start_time if 'start_time' in locals() else 0.0
         print(f"\n❌ 오류 발생: {e}")
-        print(f"⏱️ 진행 시간: {training_time/3600:.2f}시간")
         import traceback
         traceback.print_exc()
-    
+
     # 최종 저장 및 분석
     print("\n💾 모델 및 결과 저장 중...")
-    
-    # 보고서 저장
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     report_path = f"training_reports_{args.task}_optimized_{timestamp}"
     os.makedirs(report_path, exist_ok=True)
     
-    if len(callbacks) > 0 and hasattr(callbacks[0], 'save_progress_report'):
-        callbacks[0].save_progress_report(report_path)
-        if hasattr(callbacks[0], 'save_detailed_analysis'):
-            callbacks[0].save_detailed_analysis(report_path)
-    
-    # 최종 모델 저장
     model_path = f"models/{args.task}_optimized_final_{timestamp}.zip"
     Path("models").mkdir(exist_ok=True)
     model.save(model_path)
