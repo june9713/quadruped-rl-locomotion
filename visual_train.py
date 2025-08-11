@@ -159,7 +159,7 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
 
     lr_schedule = standing_lr_schedule
     clip_range = clip_range_schedule
-    
+    print("!!!!!!!!PPO 모델 생성 시작!!!!!!!!")
     model = PPO(
         "MlpPolicy",
         env,
@@ -167,7 +167,7 @@ def create_optimized_ppo_model(env, args, tensorboard_log=None):
         n_steps=4096,
         batch_size=256,
         n_epochs=10,
-        gamma=0.99,
+        gamma=0.98,
         gae_lambda=0.95,
         clip_range=clip_range,
         ent_coef=0.005,             # ✅ [수정] 초기 탐험을 장려하기 위해 엔트로피 계수 약간 증가 (기존 0.001)
