@@ -612,7 +612,7 @@ class QuadWalkingReward:
         reward_info['reward_upright'] = upright_reward * self.weights['upright']
 
         # [보상 2] 목표 높이 유지 (Height) - 4족 보행 높이
-        target_height = 0.60  # 4족 보행 목표 높이
+        target_height = 0.55  # 4족 보행 목표 높이
         height_error = abs(trunk_height - target_height)
         height_reward = np.exp(-15 * height_error)
         total_reward += self.weights['height'] * height_reward
@@ -1425,8 +1425,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (높이 체크 제거, 감점으로 대체)"""
         
         # ✅ [제거] 상체 높이 체크 로직을 제거하여, 낮은 자세는 페널티로만 처리되도록 함
-        if self.data.qpos[2] < 0.40:
-             return True, "height_too_low"
+        # if self.data.qpos[2] < 0.25:
+        #     return True, "height_too_low"
         
         # 2. 기울기 체크 (유지)
         trunk_quat = self.data.qpos[3:7]
