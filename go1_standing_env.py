@@ -1430,9 +1430,11 @@ class BipedalWalkingEnv(Go1StandingEnv):
         if abs(up_vector[1]) > np.sin(np.deg2rad(50)): # 50도 이상 기울어짐
             return True, "roll_out_of_range"
         
+        # ✅ [수정] Pitch 각도 계산 수식을 원래의 올바른 방식으로 되돌립니다.
+        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
+        
         # Pitch 각도가 범위를 벗어난 경우 (몸이 앞이나 뒤로 심하게 넘어감)
         # 2족 보행 목표 pitch는 약 -1.5rad (-86도) 근처임
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
         if not (-2.2 < pitch_angle < -0.8): # 약 -126도 ~ -45도 범위를 벗어나면 종료
             return True, "pitch_out_of_range"
         
