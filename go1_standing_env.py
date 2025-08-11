@@ -38,7 +38,7 @@ class RobotPhysicsUtils:
     BIPEDAL_READY_JOINTS = np.array([
         # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
         0.0, 2.0, -0.6,    # FR
-        0.0, 2.0, -0.0,    # FL
+        0.0, 2.0, -0.6,    # FL
         # 뒷다리 (RR, RL) - 몸을 지지하기 좋게 굽힌 상태  
         0.0, 2.5, -1.0,     # RR
         0.0, 2.5, -1.0,     # RL
