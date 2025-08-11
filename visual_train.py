@@ -374,6 +374,9 @@ def train_with_optimized_parameters(args):
     print(f"  - 병렬 환경 수: {args.num_envs}")
     print(f"  - 총 훈련 스텝: {args.total_timesteps:,}")
 
+    training_time = 0.0
+    randomness_intensity = args.randomness_intensity
+
     # 랜덤성 강도 설정
     RobotPhysicsUtils.set_randomness_intensity(args.randomness_intensity)
     print(f"🎛️ 랜덤성 강도 설정: {args.randomness_intensity}")
@@ -445,6 +448,8 @@ def train_with_optimized_parameters(args):
         print(f"📂 사전 훈련 모델 로드 ({'45차원' if env_kwargs.get('use_base_observation') else '56차원'} 모델)")
         custom_objects = {"learning_rate": args.learning_rate}
         model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
+        model.gamma = 0.98
+        print(f"변경된 gamma 값: {model.gamma}")
         print("✅ 모델 로드 및 학습률 적용 완료.")
         
     else:

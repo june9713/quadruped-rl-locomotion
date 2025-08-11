@@ -739,11 +739,13 @@ class VideoRecordingCallback(BaseCallback):
                 imageio.mimsave(filename, frames, fps=30)
                 print(f"✅ 비디오 저장: {filename} (보상: {episode_reward:.1f})")
 
-            # ✅ [추가] 녹화 기간 동안의 종료 원인 통계 출력
+            # ✅ [수정] 녹화 기간 동안의 종료 원인 통계 및 gamma 값 출력
             if total_terminations_in_video > 0:
                 print("-----------------------------------------")
                 print("| Termination Reasons (During Video)    |")
                 print(f"| Total terminations: {total_terminations_in_video:<16} |")
+                if hasattr(self.model, 'gamma'):
+                    print(f"| model.gamma: {self.model.gamma:<22.4f} |")
                 print("-----------------------------------------")
                 
                 sorted_reasons = sorted(termination_counts.items(), key=lambda item: item[1], reverse=True)
