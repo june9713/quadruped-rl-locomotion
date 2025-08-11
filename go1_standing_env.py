@@ -661,7 +661,7 @@ class QuadWalkingReward:
         return total_reward, reward_info
 
 
-class BipedalWalkingReward:
+class BipedWalkingReward:
     """
     2족 보행을 위한 보상 함수 (동적 안정성 강화 버전)
     - 비현실적인 '제자리 유지'를 '무게중심 안정성' 보상으로 대체합니다.
