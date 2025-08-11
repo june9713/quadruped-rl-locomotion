@@ -513,7 +513,7 @@ def train_with_optimized_parameters(args):
     
     # 모델 생성 또는 로드
     tensorboard_log = f"logs/{args.task}_optimized_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
+    print("use_pretrained"  ,use_pretrained)
     if use_pretrained:
         print(f"📂 사전 훈련 모델 로드: {pretrained_model_path}")
         model = PPO.load(pretrained_model_path, env=vec_env)
