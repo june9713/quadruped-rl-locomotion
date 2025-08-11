@@ -482,7 +482,7 @@ def train_with_optimized_parameters(args):
             "MlpPolicy",
             vec_env,
             learning_rate=args.learning_rate,
-            gamma=0.98,
+            gamma=0.99,
             n_steps=4096,  # 이 값들은 사전 훈련 모델과 달라도 괜찮습니다.
             batch_size=256,
             n_epochs=10,
