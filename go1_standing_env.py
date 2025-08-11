@@ -612,7 +612,7 @@ class QuadWalkingReward:
         reward_info['reward_upright'] = upright_reward * self.weights['upright']
 
         # [보상 2] 목표 높이 유지 (Height) - 4족 보행 높이
-        target_height = 0.30  # 4족 보행 목표 높이
+        target_height = 0.60  # 4족 보행 목표 높이
         height_error = abs(trunk_height - target_height)
         height_reward = np.exp(-15 * height_error)
         total_reward += self.weights['height'] * height_reward
