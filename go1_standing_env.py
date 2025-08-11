@@ -661,51 +661,6 @@ class QuadWalkingReward:
         return total_reward, reward_info
 
 
-class BipedWalkingReward:
-    """
-    2족 보행을 위한 보상 함수 (동적 보행 및 넘어짐 방지 강화 버전)
-    """
-    
-    def __init__(self):
-        # 💡 [개선] devider를 제거하고 각 가중치를 직접 조정하여 신호 강도를 높였습니다.
-        self.weights = {
-            # --- 1. 자세 유지 보상 (안정적인 서기) ---
-            'survival_bonus': 0.5,           # 생존 보너스
-            'torso_upright': 3.0,            # 상체 수직 유지 (핵심)
-            'height': 2.5,                   # 목표 높이 유지 (핵심)
-            'front_feet_up': 2.0,            # 앞발 들기 (2족 보행 자세)
-            'leg_extension': 1.5,            # 뒷다리 펴기 (웅크림 방지)
-
-            # --- 2. 동적 안정성 및 걷기 보상 ---
-            'forward_velocity': 3.0,         # 목표 속도(전진) 추종 (초기엔 비활성화)
-            'stepping': 4.0,                 # 제자리 걷기/발 내딛기 (핵심)
-            'stay_in_place': 1.5,            # 제자리 유지 (초기 안정성 확보)
-            
-            # ✅ [수정] 잘못된 페널티를 '보상'으로 전환했습니다.
-            'angular_velocity_reward': 2.0,  # 빠른 각속도 보상 (순발력)
-
-            # --- 3. 실패 방지 및 효율성 페널티 ---
-            'action_rate_penalty': -0.01,    # 행동 변화율 (부드러운 제어)
-            'energy_penalty': -0.005,        # 에너지 효율
-            'joint_limit_penalty': -2.0,     # 관절 한계
-            'foot_scuff_penalty': -1.5,      # 발 끌기 페널티
-            'low_height_penalty': -10.0,     # 너무 낮은 자세 페널티 (넘어짐)
-            'rear_calf_contact_penalty': -5.0, # 뒷다리 정강이 접촉 페널티 (주저앉음)
-        }
-        
-        self._last_action = None
-        
-        # 🎯 커리큘럼 기반 목표 속도 설정
-        self.target_forward_velocity = 0.0  # 초기에는 제자리 걸음 (0.0)
-        
-        # 뒷다리 걸음마 추적
-        self.rear_feet_air_time = np.zeros(2)
-        
-        # 정강이 geom ID 캐싱
-        self.calf_geom_ids = None
-
-    # go1_standing_env.py 파일 내 BipedalWalkingReward 클래스를 아래 코드로 전체 교체하세요.
-
 class BipedalWalkingReward:
     """
     2족 보행을 위한 보상 함수 (동적 안정성 강화 버전)
