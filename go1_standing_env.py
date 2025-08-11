@@ -670,6 +670,7 @@ class BipedWalkingReward:
         self.weights = {
             # 걷기 장려
             'forward_velocity': 1.5 / 100.0,
+            'stay_in_place': 2.0 / 100.0,  # 👈 이 줄을 추가하세요. 가중치 값은 조절 가능합니다.
             'stepping': 2.0 / 100.0,
 
             # 좋은 자세 장려
