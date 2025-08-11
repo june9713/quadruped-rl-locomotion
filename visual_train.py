@@ -10,6 +10,7 @@ from collections import deque
 import os
 import argparse
 import subprocess
+import traceback
 import sys
 import copy
 import imageio.v2 as imageio
@@ -366,42 +367,65 @@ class StandingTrainingCallback(BaseCallback):
         print(f"🏆 최고 성능 모델 저장: {best_path} (보상: {self.best_reward:.2f}){upside_down_info}")
 
 def train_with_optimized_parameters(args):
-    """2족 보행 최적화 훈련 - 관찰 공간 호환성 및 학습률 수정 적용"""
+    """2족 보행 최적화 훈련 - 관찰 공간 호환성 자동 확인 및 수정 적용"""
     print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
-    print(f"📊 최적화된 하이퍼파라미터:")
-    print(f"  - 전달된 학습률 (명령행): {args.learning_rate}")
-    print(f"  - 배치 크기: {args.batch_size}")
-    print(f"  - 롤아웃 스텝: {args.n_steps}")
+    print(f"📊 전달된 하이퍼파라미터:")
+    print(f"  - 학습률: {args.learning_rate}")
     print(f"  - 병렬 환경 수: {args.num_envs}")
     print(f"  - 총 훈련 스텝: {args.total_timesteps:,}")
 
     # 랜덤성 강도 설정
-    randomness_intensity = args.randomness_intensity
-    RobotPhysicsUtils.set_randomness_intensity(randomness_intensity)
-    print(f"🎛️ 랜덤성 강도 설정: {randomness_intensity}")
+    RobotPhysicsUtils.set_randomness_intensity(args.randomness_intensity)
+    print(f"🎛️ 랜덤성 강도 설정: {args.randomness_intensity}")
 
-    # 환경 설정
+    # 기본 환경 설정
+    env_class = BipedalWalkingEnv if args.task == "standing" else Go1MujocoEnv
     env_kwargs = {'randomize_physics': True}
-    if args.task == "standing":
-        env_class = BipedalWalkingEnv
-        print("🎯 2족 보행 환경 사용")
-    else:
-        env_class = Go1MujocoEnv
-        print("🐕 기본 4족 보행 환경 사용")
+    print(f"🎯 훈련 환경: {env_class.__name__}")
 
-    # 사전훈련 모델 사용 여부 결정
-    use_pretrained = args.pretrained_model and os.path.exists(args.pretrained_model)
-    pretrained_model_path = args.pretrained_model if use_pretrained else None
+    # 사전훈련 모델 사용 여부 및 호환성 처리
+    use_pretrained = False
+    pretrained_model_path = args.pretrained_model
 
-    # 학습용/평가용 환경 생성
-    print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중...")
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        print(f"\n🔍 사전훈련 모델 호환성 확인 중: {pretrained_model_path}")
+        
+        # ✅ [수정] 호환성 확인 및 자동 모드 전환 로직
+        temp_env_56d = env_class() # 기본 환경 (56차원)으로 임시 생성
+        is_compatible = check_observation_compatibility(pretrained_model_path, temp_env_56d)
+        temp_env_56d.close()
+
+        if is_compatible:
+            print("✅ 관찰 공간 호환됨 (56차원 모델).")
+            use_pretrained = True
+        else:
+            print("⚠️ 관찰 공간 불일치 감지. 호환 모드(45차원)로 자동 전환 시도...")
+            env_kwargs['use_base_observation'] = True # 45차원 모드로 설정
+            temp_env_45d = env_class(**env_kwargs)
+            is_compatible_45d = check_observation_compatibility(pretrained_model_path, temp_env_45d)
+            temp_env_45d.close()
+
+            if is_compatible_45d:
+                print("✅ 호환 모드(45차원)로 설정 성공! 45차원 환경으로 학습을 계속합니다.")
+                use_pretrained = True
+            else:
+                print("❌ 호환 모드로도 해결 불가. 사전 훈련 모델을 사용할 수 없습니다.")
+                choice = input("\n새 모델로 훈련을 새로 시작하시겠습니까? (y/N): ").lower()
+                if choice != 'y':
+                    print("훈련 중단.")
+                    return
+                use_pretrained = False
+                pretrained_model_path = None
+                env_kwargs.pop('use_base_observation', None) # 설정 원상 복구
+
+    # 최종 결정된 env_kwargs로 학습/평가 환경 생성
+    print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중 (관찰 공간: {'45차원(호환모드)' if env_kwargs.get('use_base_observation') else '56차원(기본)'})")
     vec_env = make_vec_env(env_class, n_envs=args.num_envs, vec_env_cls=SubprocVecEnv, env_kwargs=env_kwargs)
-    print("📊 평가 환경 생성 중...")
     eval_env = env_class(render_mode="rgb_array", **env_kwargs)
 
     # 콜백 설정
     callbacks = [
-        EnhancedVisualCallback(eval_env, eval_interval_minutes=args.visual_interval, n_eval_episodes=3, show_duration_seconds=args.show_duration, save_videos=args.save_videos, use_curriculum=args.use_curriculum),
+        EnhancedVisualCallback(eval_env, eval_interval_minutes=args.visual_interval, n_eval_episodes=3, show_duration_seconds=args.show_duration, save_videos=args.save_videos),
         StandingTrainingCallback(args, eval_env)
     ]
     if args.video_interval > 0:
@@ -414,48 +438,31 @@ def train_with_optimized_parameters(args):
     tensorboard_log = f"logs/{args.task}_optimized_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # 모델 생성 또는 로드
+    # 모델 생성 또는 로드
+    tensorboard_log = f"logs/{args.task}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
     if use_pretrained:
-        print(f"📂 사전 훈련 모델 로드 시도: {pretrained_model_path}")
-
-        # [최종 수정] PPO.load() 시점에 custom_objects를 이용해 학습률을 명확히 전달
-        custom_objects = {
-            "learning_rate": args.learning_rate
-        }
-
-        model = PPO.load(
-            pretrained_model_path,
-            env=vec_env,
-            custom_objects=custom_objects
-        )
-        print(f"✅ 모델 로드 시 새로운 학습률 적용 완료.")
-        print(f"   - 확인 1 (모델 스케줄러): {model.learning_rate}")
-        print(f"   - 확인 2 (실제 옵티마이저): {model.policy.optimizer.param_groups[0]['lr']}")
-
+        print(f"📂 사전 훈련 모델 로드 ({'45차원' if env_kwargs.get('use_base_observation') else '56차원'} 모델)")
+        custom_objects = {"learning_rate": args.learning_rate}
+        model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
+        print("✅ 모델 로드 및 학습률 적용 완료.")
+        
     else:
         print("🆕 새로운 모델 생성 중...")
         model = create_optimized_ppo_model(vec_env, args, tensorboard_log)
-
-    # 학습 시작
+    
+    # 학습 시작 (이하 로직은 기존과 동일)
     try:
-        print(f"\n🎯 2족 보행 최적화 학습 시작...")
-        print(f"📊 TensorBoard 로그: {tensorboard_log}")
-        print("💡 TensorBoard 실행: tensorboard --logdir=logs\n")
-
-        start_time = time.time()
+        print(f"\n🎯 학습 시작...")
         model.learn(
             total_timesteps=args.total_timesteps,
             callback=callbacks,
             progress_bar=True,
             reset_num_timesteps=not use_pretrained
         )
-        training_time = time.time() - start_time
-        print(f"\n⏱️ 총 훈련 시간: {training_time/3600:.2f}시간")
-
     except KeyboardInterrupt:
-        training_time = time.time() - start_time if 'start_time' in locals() else 0.0
-        print(f"\n⏹️ 사용자 중단 - 현재 상태 저장 중... (진행 시간: {training_time/3600:.2f}시간)")
+        print("\n⏹️ 사용자 중단")
     except Exception as e:
-        training_time = time.time() - start_time if 'start_time' in locals() else 0.0
         print(f"\n❌ 오류 발생: {e}")
         import traceback
         traceback.print_exc()
