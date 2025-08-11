@@ -669,28 +669,28 @@ class BipedWalkingReward:
     def __init__(self):
         self.weights = {
             # 걷기 장려
-            'forward_velocity': 1.5,
-            'stepping': 2.0,
+            'forward_velocity': 1.5 / 100.0,
+            'stepping': 2.0 / 100.0,
 
             # 좋은 자세 장려
-            'survival_bonus': 0.5,      # 생존 보너스 감소 (다른 보상으로 대체)
-            'torso_upright': 1.0,
-            'height_linear': 2.0,       # ✅ [수정] 높이에 비례하는 선형 보상
-            'front_feet_up': 4.0,
-            'leg_extension': 1.5,       # ✅ [신규] 다리 폄 보상
-            'both_feet_on_ground': 1.0, # ✅ [신규] 양발 접지 보너스
+            'survival_bonus': 0.5 / 100.0,
+            'torso_upright': 1.0 / 100.0,
+            'height_linear': 2.0 / 100.0,
+            'front_feet_up': 4.0 / 100.0,
+            'leg_extension': 1.5 / 100.0,
+            'both_feet_on_ground': 1.0 / 100.0,
 
             # 나쁜 자세/행동 페널티
-            'low_height_penalty': -8.0, # ✅ [신규] 낮은 높이에 대한 직접 페널티
-            'knee_hip_penalty': -3.0,   # ✅ [신규] 무릎>고관절 페널티
-            'foot_knee_penalty': -3.0,  # ✅ [신규] 발>무릎 페널티
-            'front_leg_contact_penalty': -3.0,
-            'rear_calf_contact_penalty': -5.0, # ✅ [수정] 무릎 접지 페널티 강화
-            'high_angular_velocity_penalty': -0.1,
-            'energy_penalty': -0.005,
-            'action_rate_penalty': -0.01,
-            'joint_limit_penalty': -2.0,
-            'foot_scuff_penalty': -0.5,
+            'low_height_penalty': -8.0 / 100.0,
+            'knee_hip_penalty': -3.0 / 100.0,
+            'foot_knee_penalty': -3.0 / 100.0,
+            'front_leg_contact_penalty': -3.0 / 100.0,
+            'rear_calf_contact_penalty': -5.0 / 100.0,
+            'high_angular_velocity_penalty': -0.1 / 100.0,
+            'energy_penalty': -0.005 / 100.0,
+            'action_rate_penalty': -0.01 / 100.0,
+            'joint_limit_penalty': -2.0 / 100.0,
+            'foot_scuff_penalty': -0.5 / 100.0,
         }
         
         self._last_action = None
