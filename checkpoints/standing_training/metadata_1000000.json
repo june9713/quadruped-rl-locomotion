@@ -6,7 +6,7 @@
     "task": "standing",
     "pretrained_model": null,
     "visual_interval": 5.0,
-    "show_duration": 8,
+    "show_duration": 4,
     "save_videos": true,
     "total_timesteps": 1000000000,
     "num_envs": 8,
@@ -23,6 +23,6 @@
     "early_stopping": false,
     "checkpoint_interval": 500000,
     "ignore_pretrained_obs_mismatch": false,
-    "randomness_intensity": 0.05
+    "randomness_intensity": 0.005
   }
 }

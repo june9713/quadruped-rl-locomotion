@@ -26,7 +26,8 @@ import torch
 import glob
 from collections import deque, defaultdict
 try:
-    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv, RobotPhysicsUtils
+    # ✅ BipedalCurriculumEnv를 import 목록에 추가합니다.
+    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv, BipedalCurriculumEnv, RobotPhysicsUtils
 except ImportError:
     print("⚠️ go1_standing_env.py 파일이 필요합니다!")
     raise
@@ -583,8 +584,17 @@ def train_with_optimized_parameters(args):
     print(f"   3. 모델 테스트: python test_model.py --model {model_path}")
     print(f"   4. 비디오 확인: eval_videos_{args.task}/")
     
+    # ✅ [수정] --use_curriculum 플래그에 따라 환경을 선택하도록 변경
     if args.use_curriculum:
-        print(f"   5. 커리큘럼 진행 상황은 TensorBoard에서 확인하세요")
+        # 커리큘럼 플래그가 있으면 BipedalCurriculumEnv 사용
+        env_class = BipedalCurriculumEnv 
+        print("🎓 커리큘럼 모드로 훈련을 시작합니다. (BipedalCurriculumEnv)")
+    else:
+        # 기본 모드
+        env_class = BipedalWalkingEnv if args.task == "standing" else Go1MujocoEnv
+
+    env_kwargs = {'randomize_physics': True}
+    print(f"🎯 훈련 환경: {env_class.__name__}")
     
     if not use_pretrained and args.pretrained_model:
         print(f"\n💡 참고: 관찰 공간 불일치로 인해 새 모델로 훈련했습니다.")

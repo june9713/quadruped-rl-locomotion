@@ -45,6 +45,21 @@ class RobotPhysicsUtils:
     ])
 
 
+    @staticmethod
+    def get_rear_feet_velocities(model, data):
+        """뒷발들의 월드 좌표계 기준 선속도(xyz)를 반환"""
+        velocities = []
+        # geom 기반으로 속도를 얻기 위해 mj_objectVelocity 사용
+        for foot_name in ["RR", "RL"]:
+            try:
+                geom_id = model.geom(foot_name).id
+                vel = np.zeros(6)
+                # com_based=0: 월드 좌표계 기준 속도
+                mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_GEOM, geom_id, vel, 0)
+                velocities.append(vel[:3]) # 선속도 (vx, vy, vz)
+            except KeyError:
+                velocities.append(np.zeros(3))
+        return velocities
 
     @staticmethod
     def get_rear_leg_part_positions(model, data):
@@ -675,6 +690,7 @@ class BipedWalkingReward:
             'height': 2.5,
             'front_feet_up': 2.0,
             'leg_extension': 1.5,
+            'swing_speed_reward': 1.5,
 
             # --- 2. 동적 안정성 및 걷기 보상 ---
             'forward_velocity': 3.0,
@@ -686,7 +702,7 @@ class BipedWalkingReward:
             'angular_velocity_reward': 2.0,
 
             # --- 3. 페널티 ---
-            'action_rate_penalty': -0.01,
+            'action_rate_penalty': -0.002,
             'energy_penalty': -0.005,
             'joint_limit_penalty': -2.0,
             'foot_scuff_penalty': -1.5,
@@ -710,14 +726,16 @@ class BipedWalkingReward:
         # --- 주요 물리량 사전 계산 ---
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
         trunk_height = data.qpos[2]
         
+        # ✅ [핵심 수정] is_contact를 모든 관련 로직보다 먼저 정의합니다.
+        rear_feet_contact = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
+        is_contact = rear_feet_contact > 0.1
+
         ##############################################################
         ### --- 1단계: 안정적인 자세 유지 (핵심 보상) --- ###
         ##############################################################
-
-        # [보상] 생존, 상체 수직, 높이, 앞발 들기, 다리 펴기 (이전과 동일)
+        # 이 부분은 이전과 동일합니다.
         total_reward += self.weights['survival_bonus']
         reward_info['reward_survival'] = self.weights['survival_bonus']
         
@@ -747,14 +765,11 @@ class BipedWalkingReward:
         leg_extension_reward = avg_leg_extension * self.weights['leg_extension']
         total_reward += leg_extension_reward
         reward_info['reward_leg_extension'] = leg_extension_reward
-
+        
         #####################################################################
         ### --- 2단계: 동적 안정성 및 걷기 학습 --- ###
         #####################################################################
-        
-        # ✅ [핵심 수정] 무게중심 안정성 보상
-        # 로봇의 무게중심(CoM)을 두 뒷발의 중심점(지지 기반의 중심) 위에 유지하도록 장려합니다.
-        # 이를 통해 로봇은 제자리에 고정되지 않고, 발을 움직여 무게중심을 맞추는 법을 학습합니다.
+        # 무게중심 보상 로직 (이전과 동일)
         rear_feet_pos = RobotPhysicsUtils.get_rear_feet_positions(model, data)
         support_center = np.mean(rear_feet_pos, axis=0)
         com_xy = data.qpos[:2]
@@ -762,15 +777,14 @@ class BipedWalkingReward:
         com_stability_reward = np.exp(-10.0 * com_error) * self.weights['com_stability']
         total_reward += com_stability_reward
         reward_info['reward_com_stability'] = com_stability_reward
-
-        # [보상] 빠른 회전(자세 보정) 및 발 내딛기 (이전과 동일)
-        angular_vel = np.linalg.norm(data.qvel[3:5]) # Roll, Pitch 속도
+        
+        # 각속도 보상 로직 (이전과 동일)
+        angular_vel = np.linalg.norm(data.qvel[3:5])
         angular_velocity_reward = np.tanh(angular_vel) * self.weights['angular_velocity_reward']
         total_reward += angular_velocity_reward
         reward_info['reward_angular_velocity'] = angular_velocity_reward
-
-        rear_feet_contact = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
-        is_contact = rear_feet_contact > 0.1
+        
+        # [보상] 발 내딛기 (Stepping) - 미리 정의된 is_contact 사용
         first_contact = (self.rear_feet_air_time > 0.0) & is_contact
         self.rear_feet_air_time += dt
         stride_time = np.clip(self.rear_feet_air_time, 0.1, 0.4)
@@ -779,9 +793,22 @@ class BipedWalkingReward:
         total_reward += stepping_reward
         reward_info['reward_stepping'] = stepping_reward
         
-        # [커리큘럼] 학습 경과에 따른 전진 유도 (이전과 동일)
+        # [보상] 스윙 속도 보상 - 미리 정의된 is_contact 사용
+        is_airborne = ~np.array(is_contact, dtype=bool) 
+        swing_speed_reward = 0.0
+        if np.any(is_airborne):
+            rear_feet_vels = RobotPhysicsUtils.get_rear_feet_velocities(model, data)
+            airborne_feet_vels = np.array(rear_feet_vels)[is_airborne]
+            horizontal_speeds = np.linalg.norm(airborne_feet_vels[:, :2], axis=1)
+            avg_swing_speed = np.mean(horizontal_speeds)
+            swing_speed_reward = np.tanh(avg_swing_speed) * self.weights.get('swing_speed_reward', 0.0)
+        total_reward += swing_speed_reward
+        reward_info['reward_swing_speed'] = swing_speed_reward
+
+        # 커리큘럼 및 페널티 로직 (이후는 이전과 동일)
+        # ... (이하 모든 코드는 이전 버전과 동일하게 유지됩니다)
         if total_timesteps > 1_000_000:
-            self.target_forward_velocity = 0.3
+            self.target_forward_velocity = 0.5
         
         if self.target_forward_velocity > 0:
             forward_vel_error = abs(data.qvel[0] - self.target_forward_velocity)
@@ -789,7 +816,6 @@ class BipedWalkingReward:
             total_reward += forward_reward
             reward_info['reward_forward_velocity'] = forward_reward
         
-        # --- 3단계: 페널티 --- (이전과 동일)
         low_height_penalty = min(0, trunk_height - 0.35) * self.weights['low_height_penalty']
         total_reward += low_height_penalty
         reward_info['penalty_low_height'] = low_height_penalty
