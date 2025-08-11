@@ -482,14 +482,14 @@ def train_with_optimized_parameters(args):
             "MlpPolicy",
             vec_env,
             learning_rate=args.learning_rate,
-            gamma=0.99,
+            gamma=0.98,
             n_steps=4096,  # 이 값들은 사전 훈련 모델과 달라도 괜찮습니다.
             batch_size=256,
-            n_epochs=30,
+            n_epochs=10,
             gae_lambda=0.95,
             clip_range=0.15,
             normalize_advantage=True,  # ✨ 원하는 새 설정 적용
-            vf_coef=1.0,               # ✨ 원하는 새 설정 적용
+            vf_coef=0.7,               # ✨ 원하는 새 설정 적용
             policy_kwargs=dict(
                 net_arch=net_arch_dict,          # 💡 여기서 확인된 구조를 사용
                 activation_fn=original_activation_fn, # 💡 여기서 확인된 활성화 함수 사용
