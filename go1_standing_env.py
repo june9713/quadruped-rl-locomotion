@@ -691,7 +691,7 @@ class BipedWalkingReward:
             'foot_knee_penalty': -3.0 / devider,
             'front_leg_contact_penalty': -3.0 / devider,
             'rear_calf_contact_penalty': -5.0 / devider,
-            'high_angular_velocity_penalty': -0.1 / devider,
+            'high_angular_velocity_penalty': 2.0 / devider,#패널티가 아니라, 매우 빠른 속도에 대해 오히려 보상해주어야 함함
             'energy_penalty': -0.005 / devider,
             'action_rate_penalty': -0.01 / devider,
             'joint_limit_penalty': -2.0 / devider,

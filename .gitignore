@@ -1,5 +1,6 @@
 logs/
 models/
+checkpoints/
 .vscode/
 .DS_Store
 .venv/

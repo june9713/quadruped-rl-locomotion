@@ -5,14 +5,14 @@
   "args": {
     "task": "standing",
     "pretrained_model": null,
-    "visual_interval": 60.0,
-    "show_duration": 5,
+    "visual_interval": 5.0,
+    "show_duration": 8,
     "save_videos": true,
-    "total_timesteps": 20000000000,
+    "total_timesteps": 1000000000,
     "num_envs": 8,
-    "video_interval": 1000000,
+    "video_interval": 100000,
     "use_curriculum": false,
-    "learning_rate": 0.0002,
+    "learning_rate": 0.0005,
     "batch_size": 128,
     "n_steps": 1024,
     "clip_range": 0.15,
@@ -21,6 +21,8 @@
     "stability_weight": 1.5,
     "height_tolerance": 0.12,
     "early_stopping": false,
-    "checkpoint_interval": 500000
+    "checkpoint_interval": 500000,
+    "ignore_pretrained_obs_mismatch": false,
+    "randomness_intensity": 0.05
   }
 }
