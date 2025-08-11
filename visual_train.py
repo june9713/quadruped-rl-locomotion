@@ -519,34 +519,15 @@ def train_with_optimized_parameters(args):
         model = PPO.load(pretrained_model_path, env=vec_env)
         model.set_env(vec_env)
         
-        # 하이퍼파라미터 업데이트
-        if hasattr(model, 'learning_rate'):
-            if args.use_curriculum:
-                def lr_schedule(progress_remaining):
-                    if progress_remaining > 0.9:
-                        return args.learning_rate * 1.2
-                    elif progress_remaining > 0.7:
-                        return args.learning_rate
-                    elif progress_remaining > 0.3:
-                        return args.learning_rate * 0.5
-                    else:
-                        return args.learning_rate * 0.2
-                model.learning_rate = lr_schedule
-            else:
-                # ✅ [수정] args에서 받은 학습률을 스케줄 함수로 명확하게 재정의합니다.
-                # 이렇게 하면 사전훈련 모델에 저장된 기존 옵티마이저의 학습률을 확실하게 덮어씁니다.
-                def new_lr_schedule(progress_remaining):
-                    """항상 명령행 인자로 받은 학습률을 반환하는 함수"""
-                    return args.learning_rate
-                
-                model.learning_rate = new_lr_schedule
-        print("model.learning_rate"  ,model.learning_rate)
-        if hasattr(model, 'clip_range'):
-            def clip_range_func(progress_remaining):
-                return args.clip_range
-            model.clip_range = clip_range_func
+        # ✅ [수정] 옵티마이저의 학습률을 직접, 강제로 변경합니다.
+        # 이 방법은 스케줄러를 우회하여 즉시 값을 변경하므로 가장 확실합니다.
+        print(f"모델에 저장된 기존 학습률: {model.learning_rate}")
         
-        print(f"✅ 하이퍼파라미터 업데이트 완료")
+        # 옵티마이저의 모든 파라미터 그룹에 새로운 학습률을 직접 할당
+        for param_group in model.policy.optimizer.param_groups:
+            param_group['lr'] = args.learning_rate
+            
+        print(f"새로운 학습률로 강제 변경 완료: {model.policy.optimizer.param_groups[0]['lr']}")
             
     else:
         print("🆕 새로운 모델 생성 중...")
