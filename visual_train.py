@@ -445,77 +445,12 @@ def train_with_optimized_parameters(args):
     tensorboard_log = f"logs/{args.task}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     if use_pretrained:
-        print(f"📂 사전 훈련 모델({pretrained_model_path}) 로드 중...")
-
-        # 1. 먼저 사전 훈련된 모델을 임시로 로드하여 '구조'를 확인합니다.
-        print("🔍 사전 훈련된 모델의 네트워크 구조 확인 중...")
-        try:
-            temp_model = PPO.load(pretrained_model_path, env=None)
-            # temp_model.policy.net_arch 에서 구조 정보를 가져옵니다.
-            original_net_arch = temp_model.policy.net_arch
-            # temp_model.policy.activation_fn 에서 활성화 함수 정보도 가져옵니다.
-            original_activation_fn = temp_model.policy.activation_fn
-            print(f"  -> 확인된 구조(net_arch): {original_net_arch}")
-            print(f"  -> 확인된 활성화 함수: {original_activation_fn.__name__}")
-
-        except Exception as e:
-            print(f"❌ 사전 훈련 모델 구조 확인 실패: {e}")
-            print("기본 구조로 모델을 생성합니다. 이 경우 set_parameters에서 오류가 발생할 수 있습니다.")
-            original_net_arch = [dict(pi=[512, 256], vf=[512, 256])] # Fallback
-            original_activation_fn = torch.nn.ReLU # Fallback
-
-        # UserWarning 수정: SB3 v1.8.0 부터는 net_arch가 list가 아닌 dict를 받도록 권장됩니다.
-        # 불러온 구조가 리스트 형태일 경우, 딕셔너리만 추출합니다.
-        if isinstance(original_net_arch, list) and len(original_net_arch) > 0 and isinstance(original_net_arch[0], dict):
-            net_arch_dict = original_net_arch[0]
-        elif isinstance(original_net_arch, dict):
-            net_arch_dict = original_net_arch
-        else:
-            # 예상치 못한 형식일 경우 기본값으로 설정
-            print(f"⚠️ 예상치 못한 net_arch 형식({type(original_net_arch)})입니다. 기본 구조를 사용합니다.")
-            net_arch_dict = dict(pi=[512, 256], vf=[512, 256])
-
-
-        # 2. 확인된 '구조'와 원하는 '설정'으로 새로운 PPO 모델 '껍데기'를 생성합니다.
-        print("🆕 확인된 구조와 새 설정을 적용하여 모델 생성 중...")
-        new_model = PPO(
-            "MlpPolicy",
-            vec_env,
-            learning_rate=args.learning_rate,
-            gamma=0.98,
-            n_steps=4096,  # 이 값들은 사전 훈련 모델과 달라도 괜찮습니다.
-            batch_size=256,
-            n_epochs=10,
-            gae_lambda=0.95,
-            clip_range=0.15,
-            normalize_advantage=True,  # ✨ 원하는 새 설정 적용
-            vf_coef=0.7,               # ✨ 원하는 새 설정 적용
-            policy_kwargs=dict(
-                net_arch=net_arch_dict,          # 💡 여기서 확인된 구조를 사용
-                activation_fn=original_activation_fn, # 💡 여기서 확인된 활성화 함수 사용
-            ),
-            device='auto',
-            tensorboard_log=tensorboard_log,
-            verbose=1,
-        )
-
-        # 3. 임시 모델에서 파라미터(가중치)를 가져와 새 모델에 적용합니다.
-        # get_parameters()는 가중치와 정규화 통계 등을 모두 포함합니다.
-        print("🧠 사전 훈련된 모델의 가중치를 새 모델로 이전 중...")
-        loaded_params = temp_model.get_parameters()
-        new_model.set_parameters(loaded_params)
-        
-        # 임시 모델은 더 이상 필요 없으므로 메모리에서 해제합니다.
-        del temp_model
-        del loaded_params
-
-        # 이제부터 학습에는 'new_model'을 사용합니다.
-        model = new_model
-        
-        print("\n✅ 모델 파라미터 이전 및 설정 적용 완료!")
-        print(f"  - normalize_advantage: {model.normalize_advantage}")
-        print(f"  - vf_coef: {model.vf_coef}")
-        print(f"  - net_arch: {model.policy.net_arch}")
+        print(f"📂 사전 훈련 모델 로드 ({'45차원' if env_kwargs.get('use_base_observation') else '56차원'} 모델)")
+        custom_objects = {"learning_rate": args.learning_rate}
+        model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
+        model.gamma = 0.98
+        print(f"변경된 gamma 값: {model.gamma}")
+        print("✅ 모델 로드 및 학습률 적용 완료.")
         
     else:
         print("🆕 새로운 모델 생성 중...")
