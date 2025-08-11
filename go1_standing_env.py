@@ -1425,7 +1425,7 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (높이 체크 제거, 감점으로 대체)"""
         
         # ✅ [제거] 상체 높이 체크 로직을 제거하여, 낮은 자세는 페널티로만 처리되도록 함
-        if self.data.qpos[2] < 0.50:
+        if self.data.qpos[2] < 0.40:
              return True, "height_too_low"
         
         # 2. 기울기 체크 (유지)
