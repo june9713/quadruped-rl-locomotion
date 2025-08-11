@@ -445,13 +445,49 @@ def train_with_optimized_parameters(args):
     tensorboard_log = f"logs/{args.task}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     if use_pretrained:
-        print(f"📂 사전 훈련 모델 로드 ({'45차원' if env_kwargs.get('use_base_observation') else '56차원'} 모델)")
-        custom_objects = {"learning_rate": args.learning_rate}
-        model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
-        model.gamma = 0.98
-        model.vf_coef = 0.7
-        print(f"변경된 gamma 값: {model.gamma}")
-        print("✅ 모델 로드 및 학습률 적용 완료.")
+    
+        # 💡 1. 원하는 설정으로 새로운 PPO 모델의 '껍데기'를 생성합니다.
+        #    (create_optimized_ppo_model 함수를 재활용하거나 직접 PPO를 정의)
+        print("🆕 normalize_advantage=True 설정을 적용하기 위해 새 모델 생성...")
+        new_model = PPO(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=args.learning_rate,  # 초기 학습률 설정
+            n_steps=4096,
+            batch_size=256,
+            n_epochs=10,
+            gamma=0.97,
+            gae_lambda=0.95,
+            clip_range=0.15,
+            normalize_advantage=True,  # ✨ 여기에 원하는 설정을 적용!
+            ent_coef=0.005,
+            vf_coef=0.7,               # ✨ vf_coef 등 다른 파라미터도 여기서 설정 가능
+            use_sde=False,
+            tensorboard_log=tensorboard_log,
+            verbose=1,
+            policy_kwargs=dict(
+                net_arch=[dict(pi=[512, 256], vf=[512, 256])],
+                activation_fn=torch.nn.ReLU,
+                ortho_init=True,
+                log_std_init=-2.0
+            ),
+            device='auto'
+        )
+
+        # 💡 2. 사전 훈련된 모델에서 파라미터(가중치)만 가져옵니다.
+        #    환경(env)을 None으로 설정하여 불필요한 로딩을 피할 수 있습니다.
+        loaded_params = PPO.load(pretrained_model_path, env=None).get_parameters()
+
+        # 💡 3. 새로 만든 모델에 파라미터를 적용합니다.
+        new_model.set_parameters(loaded_params)
+        
+        # 이제부터 'new_model'을 사용합니다.
+        model = new_model
+        
+        print("✅ 모델 파라미터 이전 및 설정 적용 완료.")
+        print(f"  - normalize_advantage: {model.normalize_advantage}")
+        print(f"  - vf_coef: {model.vf_coef}")
+        print(f"  - gamma: {model.gamma}")
         
     else:
         print("🆕 새로운 모델 생성 중...")
