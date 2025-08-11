@@ -62,7 +62,7 @@ def parse_arguments():
                        help='커리큘럼 학습 사용')
     
     # 2족 보행 최적화된 하이퍼파라미터
-    parser.add_argument('--learning_rate', type=float, default=2e-4,
+    parser.add_argument('--learning_rate', type=float, default=2e-5,
                        help='학습률 (기본값: 2e-4)')
     parser.add_argument('--batch_size', type=int, default=128,
                        help='배치 크기 (기본값: 128)')
@@ -533,7 +533,13 @@ def train_with_optimized_parameters(args):
                         return args.learning_rate * 0.2
                 model.learning_rate = lr_schedule
             else:
-                model.learning_rate = args.learning_rate
+                # ✅ [수정] args에서 받은 학습률을 스케줄 함수로 명확하게 재정의합니다.
+                # 이렇게 하면 사전훈련 모델에 저장된 기존 옵티마이저의 학습률을 확실하게 덮어씁니다.
+                def new_lr_schedule(progress_remaining):
+                    """항상 명령행 인자로 받은 학습률을 반환하는 함수"""
+                    return args.learning_rate
+                
+                model.learning_rate = new_lr_schedule
         
         if hasattr(model, 'clip_range'):
             def clip_range_func(progress_remaining):
