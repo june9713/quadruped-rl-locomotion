@@ -704,11 +704,50 @@ class BipedWalkingReward:
         # 정강이 geom ID 캐싱
         self.calf_geom_ids = None
 
-    def compute_reward(self, model, data, action, dt, episode_length):
+    # go1_standing_env.py 파일 내 BipedalWalkingReward 클래스를 아래 코드로 전체 교체하세요.
+
+class BipedalWalkingReward:
+    """
+    2족 보행을 위한 보상 함수 (동적 안정성 강화 버전)
+    - 비현실적인 '제자리 유지'를 '무게중심 안정성' 보상으로 대체합니다.
+    """
+    
+    def __init__(self):
+        self.weights = {
+            # --- 1. 자세 유지 보상 (안정적인 서기) ---
+            'survival_bonus': 0.5,
+            'torso_upright': 3.0,
+            'height': 2.5,
+            'front_feet_up': 2.0,
+            'leg_extension': 1.5,
+
+            # --- 2. 동적 안정성 및 걷기 보상 ---
+            'forward_velocity': 3.0,
+            'stepping': 4.0,
+            
+            # ✅ [수정] '제자리 유지'를 '무게중심 안정성'으로 대체했습니다.
+            'com_stability': 2.5,            # 무게중심을 지지 기반 위에 안정적으로 유지
+            
+            'angular_velocity_reward': 2.0,
+
+            # --- 3. 페널티 ---
+            'action_rate_penalty': -0.01,
+            'energy_penalty': -0.005,
+            'joint_limit_penalty': -2.0,
+            'foot_scuff_penalty': -1.5,
+            'low_height_penalty': -10.0,
+            'rear_calf_contact_penalty': -5.0,
+        }
+        
+        self._last_action = None
+        self.target_forward_velocity = 0.0
+        self.rear_feet_air_time = np.zeros(2)
+        self.calf_geom_ids = None
+
+    def compute_reward(self, model, data, action, dt, total_timesteps):
         total_reward = 0.0
         reward_info = {}
 
-        # 최초 실행 시 geom ID 캐싱
         if self.calf_geom_ids is None:
             calf_geom_names = ["RR_calf_geom1", "RR_calf_geom2", "RL_calf_geom1", "RL_calf_geom2"]
             self.calf_geom_ids = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in calf_geom_names if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) != -1}
@@ -723,12 +762,10 @@ class BipedWalkingReward:
         ### --- 1단계: 안정적인 자세 유지 (핵심 보상) --- ###
         ##############################################################
 
-        # [보상] 생존 보너스
+        # [보상] 생존, 상체 수직, 높이, 앞발 들기, 다리 펴기 (이전과 동일)
         total_reward += self.weights['survival_bonus']
         reward_info['reward_survival'] = self.weights['survival_bonus']
         
-        # [보상] 상체 수직 유지
-        # 목표 각도(-1.5rad, -86도)에 가까울수록 높은 보상
         target_pitch = -1.5
         current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
         pitch_error = abs(current_pitch - target_pitch)
@@ -736,21 +773,18 @@ class BipedWalkingReward:
         total_reward += upright_reward
         reward_info['reward_upright'] = upright_reward
         
-        # [보상] 목표 높이 유지
         target_height = 0.62
         height_error = abs(trunk_height - target_height)
         height_reward = np.exp(-10.0 * height_error) * self.weights['height']
         total_reward += height_reward
         reward_info['reward_height'] = height_reward
 
-        # [보상] 앞발 들기 (2족 보행 자세)
         front_feet_heights = RobotPhysicsUtils.get_front_feet_heights(model, data)
         avg_front_feet_height = np.mean(front_feet_heights)
         front_feet_reward = np.tanh(avg_front_feet_height / 0.15) * self.weights['front_feet_up']
         total_reward += front_feet_reward
         reward_info['reward_front_feet_up'] = front_feet_reward
 
-        # [보상] 뒷다리 펴기 (웅크린 자세 방지)
         leg_pos = RobotPhysicsUtils.get_rear_leg_part_positions(model, data)
         hip_knee_dist_rr = np.linalg.norm(leg_pos['hip'][0] - leg_pos['knee'][0])
         hip_knee_dist_rl = np.linalg.norm(leg_pos['hip'][1] - leg_pos['knee'][1])
@@ -763,59 +797,54 @@ class BipedWalkingReward:
         ### --- 2단계: 동적 안정성 및 걷기 학습 --- ###
         #####################################################################
         
-        # ✅ [핵심 수정] 빠른 회전(자세 보정)에 대한 '보상'
+        # ✅ [핵심 수정] 무게중심 안정성 보상
+        # 로봇의 무게중심(CoM)을 두 뒷발의 중심점(지지 기반의 중심) 위에 유지하도록 장려합니다.
+        # 이를 통해 로봇은 제자리에 고정되지 않고, 발을 움직여 무게중심을 맞추는 법을 학습합니다.
+        rear_feet_pos = RobotPhysicsUtils.get_rear_feet_positions(model, data)
+        support_center = np.mean(rear_feet_pos, axis=0)
+        com_xy = data.qpos[:2]
+        com_error = np.linalg.norm(com_xy - support_center)
+        com_stability_reward = np.exp(-10.0 * com_error) * self.weights['com_stability']
+        total_reward += com_stability_reward
+        reward_info['reward_com_stability'] = com_stability_reward
+
+        # [보상] 빠른 회전(자세 보정) 및 발 내딛기 (이전과 동일)
         angular_vel = np.linalg.norm(data.qvel[3:5]) # Roll, Pitch 속도
         angular_velocity_reward = np.tanh(angular_vel) * self.weights['angular_velocity_reward']
         total_reward += angular_velocity_reward
         reward_info['reward_angular_velocity'] = angular_velocity_reward
 
-        # [보상] 발 내딛기 (Stepping)
         rear_feet_contact = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         is_contact = rear_feet_contact > 0.1
         first_contact = (self.rear_feet_air_time > 0.0) & is_contact
         self.rear_feet_air_time += dt
-        
         stride_time = np.clip(self.rear_feet_air_time, 0.1, 0.4)
         stepping_reward = np.sum(stride_time * first_contact) * self.weights['stepping']
-        self.rear_feet_air_time[is_contact] = 0.0 # 접촉 시 시간 초기화
+        self.rear_feet_air_time[is_contact] = 0.0
         total_reward += stepping_reward
         reward_info['reward_stepping'] = stepping_reward
-
-        # 🎯 [커리큘럼] 훈련 경과에 따라 전진하도록 유도
-        # 초기 100만 스텝까지는 제자리 걸음 학습에 집중
-        if episode_length > 1_000_000:
-            self.target_forward_velocity = 0.3 # 안정화되면 전진 시작
+        
+        # [커리큘럼] 학습 경과에 따른 전진 유도 (이전과 동일)
+        if total_timesteps > 1_000_000:
+            self.target_forward_velocity = 0.3
         
         if self.target_forward_velocity > 0:
-            # [보상] 전진 속도
             forward_vel_error = abs(data.qvel[0] - self.target_forward_velocity)
             forward_reward = np.exp(-5.0 * forward_vel_error) * self.weights['forward_velocity']
             total_reward += forward_reward
             reward_info['reward_forward_velocity'] = forward_reward
-        else:
-            # [보상] 제자리 유지 (초기 학습 단계)
-            horizontal_dist = np.linalg.norm(data.qpos[:2])
-            stay_in_place_reward = np.exp(-5.0 * horizontal_dist) * self.weights['stay_in_place']
-            total_reward += stay_in_place_reward
-            reward_info['reward_stay_in_place'] = stay_in_place_reward
-
-        ##############################################################
-        ### --- 3단계: 페널티 (나쁜 자세 및 행동 방지) --- ###
-        ##############################################################
-
-        # [페널티] 너무 낮은 높이 (넘어짐)
+        
+        # --- 3단계: 페널티 --- (이전과 동일)
         low_height_penalty = min(0, trunk_height - 0.35) * self.weights['low_height_penalty']
         total_reward += low_height_penalty
         reward_info['penalty_low_height'] = low_height_penalty
         
-        # [페널티] 뒷다리 정강이 지면 접촉 (주저앉음)
-        ground_geom_id = 0 
+        ground_geom_id = 0
         calf_contact_count = sum(1 for i in range(data.ncon) if (data.contact[i].geom1 in self.calf_geom_ids and data.contact[i].geom2 == ground_geom_id) or (data.contact[i].geom2 in self.calf_geom_ids and data.contact[i].geom1 == ground_geom_id))
         rear_calf_penalty = calf_contact_count * self.weights['rear_calf_contact_penalty']
         total_reward += rear_calf_penalty
         reward_info['penalty_rear_calf_contact'] = rear_calf_penalty
         
-        # [페널티] 에너지 및 제어 효율성
         energy_penalty = np.sum(np.square(data.ctrl)) * self.weights['energy_penalty']
         total_reward += energy_penalty
         reward_info['penalty_energy'] = energy_penalty
