@@ -26,7 +26,6 @@ import torch
 import glob
 from collections import deque, defaultdict
 try:
-    # ✅ BipedalCurriculumEnv를 import 목록에 추가합니다.
     from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv, BipedalCurriculumEnv, RobotPhysicsUtils
 except ImportError:
     print("⚠️ go1_standing_env.py 파일이 필요합니다!")
@@ -44,6 +43,9 @@ def parse_arguments():
     """명령행 인수 파싱 - 2족 보행 최적화"""
     parser = argparse.ArgumentParser(description='2족 보행 강화학습 시각적 훈련')
     
+    parser.add_argument('--extreme_gpu', action='store_true',
+                       help='GPU 활용을 극대화하는 하이퍼파라미터 및 최적화 적용')
+
     parser.add_argument('--task', type=str, default='standing', 
                        help='훈련할 태스크 (기본값: standing)')
     parser.add_argument('--pretrained_model', type=str, default=None,
@@ -63,7 +65,6 @@ def parse_arguments():
     parser.add_argument('--use_curriculum', action='store_true',
                        help='커리큘럼 학습 사용')
     
-    # 2족 보행 최적화된 하이퍼파라미터
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                        help='학습률 (기본값: 2e-4)')
     parser.add_argument('--batch_size', type=int, default=128,
@@ -75,7 +76,6 @@ def parse_arguments():
     parser.add_argument('--entropy_coef', type=float, default=0.005,
                        help='엔트로피 계수 (기본값: 0.005)')
     
-    # 새로운 2족 보행 특화 파라미터
     parser.add_argument('--target_vel', type=float, default=0.0,
                        help='목표 속도 (기본값: 0.0 - 제자리 서기)')
     parser.add_argument('--stability_weight', type=float, default=1.5,
@@ -87,11 +87,9 @@ def parse_arguments():
     parser.add_argument('--checkpoint_interval', type=int, default=500_000,
                        help='체크포인트 저장 간격 (기본값: 500,000)')
     
-    # 새로운 옵션: 관찰 공간 호환성
     parser.add_argument('--ignore_pretrained_obs_mismatch', action='store_true',
                        help='사전훈련 모델과 관찰공간 불일치 무시하고 새 모델 생성')
     
-    # ✅ 랜덤성 강도 조정 옵션 추가
     parser.add_argument('--randomness_intensity', type=float, default=1.5,
                        help='훈련 시 랜덤성 강도 (0.0=없음, 1.0=기본, 2.0=강화, 기본값: 1.5)')
     
@@ -101,98 +99,111 @@ def parse_arguments():
 def check_observation_compatibility(pretrained_model_path, current_env):
     """사전훈련 모델과 현재 환경의 관찰 공간 호환성 확인"""
     try:
-        # 임시로 모델 로드해서 observation space 확인
         if os.path.exists(pretrained_model_path):
-            temp_model = PPO.load(pretrained_model_path, env=None)
+            # --- 수정: 호환성 확인 로직 간소화 ---
+            # 여기서 발생하는 state_dict 오류는 무시하고, 실제 로드 시 처리하도록 함
+            # 여기서는 관찰 공간 크기만 비교하는 것이 목적
+            from stable_baselines3.common.save_util import load_from_zip_file
+            data, params, pytorch_variables = load_from_zip_file(pretrained_model_path)
             
-            # 모델의 observation space 추출
-            if hasattr(temp_model.policy, 'observation_space'):
-                model_obs_shape = temp_model.policy.observation_space.shape
+            # 모델의 관찰 공간 shape 추정
+            # policy_kwargs가 저장되어 있다면 그것을 사용
+            if params and 'policy' in params and 'observation_space' in params['policy']:
+                 model_obs_shape = params['policy']['observation_space'].shape
             else:
-                # 정책 네트워크의 첫 번째 레이어 크기로 추정
-                first_layer = next(temp_model.policy.features_extractor.parameters())
-                model_obs_shape = (first_layer.shape[1],)
-            
-            # 현재 환경의 observation space
+                # 없다면, state_dict에서 첫 번째 레이어 크기로 추정 (부정확할 수 있음)
+                first_weight_key = next(iter(data['policy']))
+                first_weight_tensor = data['policy'][first_weight_key]
+                # This is a heuristic and might not always be correct
+                model_obs_shape = (first_weight_tensor.shape[1],) if len(first_weight_tensor.shape) > 1 else None
+
             current_obs_shape = current_env.observation_space.shape
             
             print(f"🔍 관찰 공간 호환성 확인:")
-            print(f"  사전훈련 모델: {model_obs_shape}")
+            print(f"  사전훈련 모델 (추정): {model_obs_shape}")
             print(f"  현재 환경: {current_obs_shape}")
-            
-            compatible = model_obs_shape == current_obs_shape
-            
-            if compatible:
-                print("✅ 관찰 공간 호환 가능")
+
+            if model_obs_shape is None or model_obs_shape[0] != current_obs_shape[0]:
+                 print("❌ 관찰 공간 불일치 감지")
+                 return False
             else:
-                print("❌ 관찰 공간 불일치 감지")
-                print("  옵션:")
-                print("  1. --ignore_pretrained_obs_mismatch 플래그 사용")
-                print("  2. 동일한 환경에서 훈련된 모델 사용")
-                print("  3. 새로운 모델로 훈련 시작")
-            
-            del temp_model  # 메모리 정리
-            return compatible
+                 print("✅ 관찰 공간 호환 가능")
+                 return True
             
     except Exception as e:
-        print(f"⚠️ 호환성 확인 실패: {e}")
-        return False
+        print(f"⚠️ 호환성 확인 중 오류 발생 (로드 시 재시도): {e}")
+        # 확인 단계에서 오류가 나더라도, 실제 로드 로직에서 처리할 수 있으므로 True를 반환하여 진행
+        return True
     
     return False
 
 
-def create_optimized_ppo_model(env, args, tensorboard_log=None):
+def create_optimized_ppo_model(env, args, device, tensorboard_log=None):
     """2족 보행 최적화된 PPO 모델 생성"""
     
-    def standing_lr_schedule(progress_remaining):
-        if progress_remaining > 0.8:
-            return 1e-4
-        elif progress_remaining > 0.5:
-            return 5e-5
-        else:
-            return 1e-5
-            
-    def clip_range_schedule(progress_remaining):
-        if progress_remaining > 0.5:
-            return 0.2
-        else:
-            return 0.1
+    if args.extreme_gpu:
+        print("🚀 극단적 GPU 활용 모드로 PPO 모델을 생성합니다.")
+        ppo_params = {
+            'n_steps': 8192,
+            'batch_size': 1024,
+            'n_epochs': 60,
+            'gamma': 0.99,
+            'gae_lambda': 0.95,
+            'learning_rate': 3e-5,
+            'clip_range': 0.2,
+            'ent_coef': 0.001,
+            'vf_coef': 0.5,
+            'max_grad_norm': 1.0,
+            'policy_kwargs': dict(
+                net_arch=[dict(pi=[1024, 512, 256], vf=[1024, 512, 256])],
+                activation_fn=torch.nn.ReLU,
+                ortho_init=True,
+                log_std_init=-2.0
+            ),
+        }
+    else:
+        def standing_lr_schedule(progress_remaining):
+            if progress_remaining > 0.8: return 3e-5
+            elif progress_remaining > 0.5: return 2e-5
+            else: return 1e-5
+                
+        def clip_range_schedule(progress_remaining):
+            return 0.2 if progress_remaining > 0.5 else 0.1
 
-    lr_schedule = standing_lr_schedule
-    clip_range = clip_range_schedule
-    print("!!!!!!!!PPO 모델 생성 시작!!!!!!!!")
+        ppo_params = {
+            'n_steps': 4096,
+            'batch_size': 256,
+            'n_epochs': 30,
+            'gamma': 0.98,
+            'gae_lambda': 0.95,
+            'learning_rate': standing_lr_schedule,
+            'clip_range': clip_range_schedule,
+            'ent_coef': 0.005,
+            'vf_coef': 0.7,
+            'max_grad_norm': 0.5,
+            'policy_kwargs': dict(
+                net_arch=[dict(pi=[512, 256], vf=[512, 256])],
+                activation_fn=torch.nn.ReLU,
+                ortho_init=True,
+                log_std_init=-2.0
+            ),
+        }
+
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=lr_schedule,
-        n_steps=4096,
-        batch_size=256,
-        n_epochs=30,
-        gamma=0.98,
-        gae_lambda=0.95,
-        clip_range=clip_range,
         normalize_advantage=True,
-        ent_coef=0.005,             # ✅ [수정] 초기 탐험을 장려하기 위해 엔트로피 계수 약간 증가 (기존 0.001)
-        vf_coef=0.7,
-        max_grad_norm=0.5,
         use_sde=False,
         tensorboard_log=tensorboard_log,
         verbose=1,
-        policy_kwargs=dict(
-            net_arch=[dict(pi=[512, 256], vf=[512, 256])],
-            activation_fn=torch.nn.ReLU,
-            ortho_init=True,
-            log_std_init=-2.0
-        ),
-        device='auto'
+        device=device,
+        **ppo_params
     )
     
     return model
 
-
+# StandingTrainingCallback 클래스는 변경 사항 없음 (생략)
 class StandingTrainingCallback(BaseCallback):
-    """2족 보행 특화 훈련 콜백 - 환경별 보상 객체 호환"""
-    
     def __init__(self, args, eval_env, verbose=0):
         super().__init__(verbose)
         self.args = args
@@ -200,235 +211,159 @@ class StandingTrainingCallback(BaseCallback):
         self.best_reward = -np.inf
         self.no_improvement_steps = 0
         self.patience = 1_000_000
-        
-        # 성능 추적
         self.episode_rewards = deque(maxlen=100)
         self.success_rates = deque(maxlen=50)
         self.last_checkpoint = 0
-        
-        # 물구나무서기 통계 추적
         self.last_upside_down_count = 0
-        
-        # ⚠️ [제거] 전역 종료 원인 통계 추적 제거
-        # self.termination_counts = defaultdict(int)
-
-        # 정보 버퍼는 다른 용도로 사용될 수 있으므로 유지
         self.manual_info_buffer = deque(maxlen=args.num_envs * 2)
-        
     def _get_reward_object(self, env):
-        """환경에서 적절한 보상 객체 찾기"""
-        if hasattr(env, 'bipedal_reward'):
-            return env.bipedal_reward
-        elif hasattr(env, 'standing_reward'):
-            return env.standing_reward
+        if hasattr(env, 'bipedal_reward'): return env.bipedal_reward
+        elif hasattr(env, 'standing_reward'): return env.standing_reward
         elif hasattr(env, 'env'):
-            if hasattr(env.env, 'bipedal_reward'):
-                return env.env.bipedal_reward
-            elif hasattr(env.env, 'standing_reward'):
-                return env.env.standing_reward
+            if hasattr(env.env, 'bipedal_reward'): return env.env.bipedal_reward
+            elif hasattr(env.env, 'standing_reward'): return env.env.standing_reward
         return None
-        
     def _on_step(self) -> bool:
-        """매 스텝마다 호출"""
-        
         dones = self.locals.get("dones", [])
         infos = self.locals.get("infos", [])
-
-        # ⚠️ [수정] 종료 원인 집계를 위해 버퍼를 채우는 로직은 유지하되,
-        # 사용처가 없어졌으므로 향후 다른 통계에 활용될 수 있음.
         for i, done in enumerate(dones):
-            if done:
-                self.manual_info_buffer.append(copy.deepcopy(infos[i]))
-
-        # 체크포인트 저장 로직
+            if done: self.manual_info_buffer.append(copy.deepcopy(infos[i]))
         if (self.num_timesteps - self.last_checkpoint >= self.args.checkpoint_interval):
             self._save_checkpoint()
             self.last_checkpoint = self.num_timesteps
-            
         return True
-    
     def _on_rollout_end(self) -> bool:
-        """롤아웃 종료 시 통계 출력"""
-        
-        # ⚠️ [제거] 전역 종료 원인 집계 로직 제거
-        
-        # 버퍼는 비움
         self.manual_info_buffer.clear()
-        
-        # 기존 성능 평가 로직
         if len(self.locals.get('episode_rewards', [])) > 0:
             recent_rewards = self.locals['episode_rewards'][-10:]
             mean_reward = np.mean(recent_rewards)
             self.episode_rewards.extend(recent_rewards)
-            
             if mean_reward > self.best_reward:
                 self.best_reward = mean_reward
                 self.no_improvement_steps = 0
                 self._save_best_model()
             else:
                 self.no_improvement_steps += self.args.n_steps * self.args.num_envs
-        
-        # 기타 통계 수집 및 출력
         self._log_upside_down_statistics()
-        
-        # ⚠️ [제거] 종료 원인 통계 출력 함수 호출 제거
-        
-        # 조기 정지 확인
-        if (self.args.early_stopping and 
-            self.no_improvement_steps > self.patience):
+        if (self.args.early_stopping and self.no_improvement_steps > self.patience):
             print(f"\n🛑 조기 정지: {self.patience:,} 스텝 동안 개선 없음")
             return False
-            
         return True
-
-    # ⚠️ [제거] _log_termination_statistics 메서드 전체 제거
-
     def _log_upside_down_statistics(self):
-        """통계 로깅 - 환경별 보상 객체 호환"""
         try:
-            # 환경에서 카운트 수집
             upside_down_counts = []
-            
-            # 모든 병렬 환경에서 통계 수집
             if hasattr(self.training_env, 'envs'):
                 for env in self.training_env.envs:
                     try:
                         reward_obj = self._get_reward_object(env)
-                        if reward_obj:
-                            count = getattr(reward_obj, 'upside_down_count', 0)
-                            upside_down_counts.append(count)
-                    except:
-                        pass
-            
-            # 통계 계산
+                        if reward_obj: upside_down_counts.append(getattr(reward_obj, 'upside_down_count', 0))
+                    except: pass
             if upside_down_counts:
                 total_upside_down = sum(upside_down_counts)
                 new_attempts = total_upside_down - self.last_upside_down_count
                 avg_per_env = total_upside_down / len(upside_down_counts)
-                
-                # PPO 로그와 함께 출력될 추가 정보
-                print(f"🚨 물구나무서기 통계:")
-                print(f"   총 시도 횟수: {total_upside_down}회")
-                print(f"   이번 롤아웃 새로운 시도: {new_attempts}회")
-                print(f"   환경당 평균: {avg_per_env:.1f}회")
-                
-                # TensorBoard에도 로깅
+                print(f"🚨 물구나무서기 통계: 총 {total_upside_down}회, 이번 롤아웃 {new_attempts}회, 환경당 평균 {avg_per_env:.1f}회")
                 if hasattr(self.logger, 'record'):
                     self.logger.record("custom/total_upside_down_attempts", total_upside_down)
                     self.logger.record("custom/new_upside_down_attempts", new_attempts)
                     self.logger.record("custom/avg_upside_down_per_env", avg_per_env)
-                
                 self.last_upside_down_count = total_upside_down
-                
-        except Exception as e:
-            print(f"⚠️ 통계 수집 실패: {e}")
-    
+        except Exception as e: print(f"⚠️ 통계 수집 실패: {e}")
     def _save_checkpoint(self):
-        """체크포인트 저장"""
         checkpoint_dir = Path("checkpoints") / f"{self.args.task}_training"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
         checkpoint_path = checkpoint_dir / f"checkpoint_{self.num_timesteps}.zip"
         self.model.save(checkpoint_path)
-        
-        # 통계도 메타데이터에 포함
-        try:
-            reward_obj = self._get_reward_object(self.eval_env)
-            upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0
-        except:
-            upside_down_count = 0
-        
-        metadata = {
-            'timesteps': self.num_timesteps,
-            'best_reward': self.best_reward,
-            'upside_down_attempts': upside_down_count,
-            'args': vars(self.args)
-        }
-        
+        try: reward_obj = self._get_reward_object(self.eval_env); upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0
+        except: upside_down_count = 0
+        metadata = {'timesteps': self.num_timesteps, 'best_reward': self.best_reward, 'upside_down_attempts': upside_down_count, 'args': vars(self.args)}
         import json
-        with open(checkpoint_dir / f"metadata_{self.num_timesteps}.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
-            
+        with open(checkpoint_dir / f"metadata_{self.num_timesteps}.json", 'w') as f: json.dump(metadata, f, indent=2)
         print(f"💾 체크포인트 저장: {checkpoint_path} (물구나무 시도: {upside_down_count}회)")
-    
     def _save_best_model(self):
-        """최고 성능 모델 저장"""
         best_dir = Path("models") / "best"
         best_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 통계 포함
-        try:
-            reward_obj = self._get_reward_object(self.eval_env)
-            upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0
-            upside_down_info = f" (물구나무: {upside_down_count}회)"
-        except:
-            upside_down_info = ""
-        
+        try: reward_obj = self._get_reward_object(self.eval_env); upside_down_count = getattr(reward_obj, 'upside_down_count', 0) if reward_obj else 0; upside_down_info = f" (물구나무: {upside_down_count}회)"
+        except: upside_down_info = ""
         best_path = best_dir / f"{self.args.task}_best_{self.num_timesteps}.zip"
         self.model.save(best_path)
         print(f"🏆 최고 성능 모델 저장: {best_path} (보상: {self.best_reward:.2f}){upside_down_info}")
 
+
+def load_compiled_model(model_path, env, device):
+    """torch.compile로 저장된 모델을 안전하게 불러오는 함수"""
+    print(f"📦 컴파일된 모델 체크포인트 로드를 시도합니다: {model_path}")
+    
+    from stable_baselines3.common.save_util import load_from_zip_file
+    
+    # 1. 체크포인트 파일에서 데이터를 먼저 로드합니다.
+    data, params, pytorch_variables = load_from_zip_file(model_path, device=device)
+    
+    # 2. 모델의 하이퍼파라미터로 새로운 PPO 모델을 생성합니다.
+    #    이렇게 하면 올바른 신경망 구조를 가진 모델이 만들어집니다.
+    model = PPO(
+        policy=params["policy_class"],
+        env=env,
+        device=device,
+        _init_setup_model=False, # 모델을 바로 초기화하지 않음
+    )
+    model.set_parameters(params, exact_match=False) # 로드된 파라미터 적용
+    model._setup_model() # 모델 초기화
+
+    # 3. state_dict의 키에서 '_orig_mod.' 접두사를 제거합니다.
+    policy_state_dict = data['policy']
+    cleaned_state_dict = {}
+    for k, v in policy_state_dict.items():
+        cleaned_state_dict[k.replace("_orig_mod.", "")] = v
+        
+    # 4. 정리된 state_dict를 모델 정책에 로드합니다.
+    model.policy.load_state_dict(cleaned_state_dict)
+    
+    print("✅ 컴파일된 모델 상태 복구 및 로드 성공!")
+    return model
+
+
 def train_with_optimized_parameters(args):
     """2족 보행 최적화 훈련 - 관찰 공간 호환성 자동 확인 및 수정 적용"""
-    print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
-    print(f"📊 전달된 하이퍼파라미터:")
-    print(f"  - 학습률: {args.learning_rate}")
-    print(f"  - 병렬 환경 수: {args.num_envs}")
-    print(f"  - 총 훈련 스텝: {args.total_timesteps:,}")
+    
+    if torch.cuda.is_available():
+        print("✅ CUDA 사용 가능. GPU(RTX 5080)로 훈련을 시작합니다.")
+        print(f"   - PyTorch 버전: {torch.__version__}")
+        print(f"   - CUDA 버전: {torch.version.cuda}")
+        print(f"   - GPU 장치: {torch.cuda.get_device_name(0)}")
+        device = torch.device("cuda")
+        torch.set_float32_matmul_precision('high')
+    else:
+        print("⚠️ CUDA를 사용할 수 없습니다. CPU로 훈련을 시작합니다.")
+        device = torch.device("cpu")
 
+    if args.extreme_gpu:
+        print("="*60)
+        print("⚠️ '극단적 GPU 활용 모드'가 활성화되었습니다.")
+        print("   - 병렬 환경 수(--num_envs)를 CPU 코어 수에 맞게 높여주세요 (예: 16, 24, 32).")
+        print("   - GPU 메모리 사용량이 크게 증가할 수 있습니다.")
+        print("="*60)
+
+    print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
+    
     training_time = 0.0
     randomness_intensity = args.randomness_intensity
-
-    # 랜덤성 강도 설정
     RobotPhysicsUtils.set_randomness_intensity(args.randomness_intensity)
     print(f"🎛️ 랜덤성 강도 설정: {args.randomness_intensity}")
 
-    # 기본 환경 설정
     env_class = BipedalWalkingEnv if args.task == "standing" else Go1MujocoEnv
     env_kwargs = {'randomize_physics': True}
     print(f"🎯 훈련 환경: {env_class.__name__}")
 
-    # 사전훈련 모델 사용 여부 및 호환성 처리
     use_pretrained = False
     pretrained_model_path = args.pretrained_model
-
     if pretrained_model_path and os.path.exists(pretrained_model_path):
-        print(f"\n🔍 사전훈련 모델 호환성 확인 중: {pretrained_model_path}")
-        
-        # ✅ [수정] 호환성 확인 및 자동 모드 전환 로직
-        temp_env_56d = env_class() # 기본 환경 (56차원)으로 임시 생성
-        is_compatible = check_observation_compatibility(pretrained_model_path, temp_env_56d)
-        temp_env_56d.close()
+        use_pretrained = True
 
-        if is_compatible:
-            print("✅ 관찰 공간 호환됨 (56차원 모델).")
-            use_pretrained = True
-        else:
-            print("⚠️ 관찰 공간 불일치 감지. 호환 모드(45차원)로 자동 전환 시도...")
-            env_kwargs['use_base_observation'] = True # 45차원 모드로 설정
-            temp_env_45d = env_class(**env_kwargs)
-            is_compatible_45d = check_observation_compatibility(pretrained_model_path, temp_env_45d)
-            temp_env_45d.close()
-
-            if is_compatible_45d:
-                print("✅ 호환 모드(45차원)로 설정 성공! 45차원 환경으로 학습을 계속합니다.")
-                use_pretrained = True
-            else:
-                print("❌ 호환 모드로도 해결 불가. 사전 훈련 모델을 사용할 수 없습니다.")
-                choice = input("\n새 모델로 훈련을 새로 시작하시겠습니까? (y/N): ").lower()
-                if choice != 'y':
-                    print("훈련 중단.")
-                    return
-                use_pretrained = False
-                pretrained_model_path = None
-                env_kwargs.pop('use_base_observation', None) # 설정 원상 복구
-
-    # 최종 결정된 env_kwargs로 학습/평가 환경 생성
-    print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중 (관찰 공간: {'45차원(호환모드)' if env_kwargs.get('use_base_observation') else '56차원(기본)'})")
+    print(f"\n🏭 {args.num_envs}개 병렬 환경 생성 중...")
     vec_env = make_vec_env(env_class, n_envs=args.num_envs, vec_env_cls=SubprocVecEnv, env_kwargs=env_kwargs)
     eval_env = env_class(render_mode="rgb_array", **env_kwargs)
 
-    # 콜백 설정
     callbacks = [
         EnhancedVisualCallback(eval_env, eval_interval_minutes=args.visual_interval, n_eval_episodes=3, show_duration_seconds=args.show_duration, save_videos=args.save_videos),
         StandingTrainingCallback(args, eval_env)
@@ -439,42 +374,55 @@ def train_with_optimized_parameters(args):
             VideoRecordingCallback(record_env, record_interval_timesteps=args.video_interval, video_folder=f"eval_videos_{args.task}", show_duration_seconds=args.show_duration)
         )
 
-    # TensorBoard 로그 경로 설정
-    tensorboard_log = f"logs/{args.task}_optimized_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    # 모델 생성 또는 로드
-    # 모델 생성 또는 로드
     tensorboard_log = f"logs/{args.task}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     if use_pretrained:
-        print(f"📂 사전 훈련 모델 로드 ({'45차원' if env_kwargs.get('use_base_observation') else '56차원'} 모델)")
-        custom_objects = {"learning_rate": args.learning_rate}
-        model = PPO.load(pretrained_model_path, env=vec_env, custom_objects=custom_objects)
-        #model.gamma = 0.98
-        #print(f"변경된 gamma 값: {model.gamma}")
-        print("✅ 모델 로드 및 학습률 적용 완료.")
-        
+        print(f"📂 사전 훈련 모델 로드를 시도합니다: {pretrained_model_path}")
+        try:
+            # --- 수정: torch.compile 복구 로직 적용 ---
+            # 먼저 일반 로드를 시도하고, 실패하면 컴파일된 모델 복구 로직을 실행합니다.
+            try:
+                model = PPO.load(pretrained_model_path, env=vec_env, device=device)
+                print("✅ 모델 일반 로드 성공.")
+            except Exception:
+                model = load_compiled_model(pretrained_model_path, vec_env, device)
+            
+        except Exception as e:
+            print(f"❌ 모델 로드에 최종 실패했습니다: {e}")
+            print("🆕 새로운 모델로 훈련을 시작합니다.")
+            model = create_optimized_ppo_model(vec_env, args, device, tensorboard_log)
     else:
         print("🆕 새로운 모델 생성 중...")
-        model = create_optimized_ppo_model(vec_env, args, tensorboard_log)
+        model = create_optimized_ppo_model(vec_env, args, device, tensorboard_log)
     
-    # 학습 시작 (이하 로직은 기존과 동일)
+    if args.extreme_gpu and device.type == 'cuda' and hasattr(torch, 'compile'):
+        print("🚀 PyTorch 2.x JIT 컴파일러(torch.compile)를 정책 모델에 적용합니다...")
+        try:
+            model.policy = torch.compile(model.policy)
+            print("✅ torch.compile 적용 성공!")
+        except Exception as e:
+            print(f"⚠️ torch.compile 적용 실패. Triton이 설치되지 않았거나 지원되지 않는 환경(예: Windows)일 수 있습니다.")
+            print(f"   (오류: {e})")
+            print(f"   JIT 컴파일 없이 훈련을 계속합니다.")
+
     try:
+        start_time = time.time()
         print(f"\n🎯 학습 시작...")
+        # reset_num_timesteps=False로 설정하여 이전 학습 스텝을 이어가도록 함
         model.learn(
             total_timesteps=args.total_timesteps,
             callback=callbacks,
             progress_bar=True,
-            reset_num_timesteps=not use_pretrained
+            reset_num_timesteps=not use_pretrained 
         )
+        training_time = time.time() - start_time
     except KeyboardInterrupt:
         print("\n⏹️ 사용자 중단")
     except Exception as e:
         print(f"\n❌ 오류 발생: {e}")
-        import traceback
         traceback.print_exc()
 
-    # 최종 저장 및 분석
+    # 최종 저장 및 분석 (생략)
     print("\n💾 모델 및 결과 저장 중...")
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     report_path = f"training_reports_{args.task}_optimized_{timestamp}"
@@ -603,7 +551,8 @@ def train_with_optimized_parameters(args):
         print(f"   2. 또는 --ignore_pretrained_obs_mismatch 플래그 사용")
         print(f"   3. 또는 환경에 use_base_observation=True 설정")
 
-
 if __name__ == "__main__":
     args = parse_arguments()
+    import multiprocessing
+    multiprocessing.set_start_method('spawn', force=True)
     train_with_optimized_parameters(args)

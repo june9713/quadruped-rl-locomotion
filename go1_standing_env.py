@@ -149,19 +149,21 @@ class RobotPhysicsUtils:
         # 기본 노이즈 스케일 (진행도에 따라 감소)
         base_noise = 1.0 - 0.5 * progress  # 1.0 → 0.5
         final_intensity = base_noise * intensity_multiplier * global_intensity
+        height_intensity = 1.0
+        position_intensity = 1.0
         
         return {
             # 위치 랜덤성
             'position': {
-                'base_noise': 0.15 * final_intensity,
-                'extreme_prob': 0.3 * global_intensity,
-                'extreme_range': (0.3 * global_intensity, 0.8 * global_intensity)
+                'base_noise': 0.15 * position_intensity,
+                'extreme_prob': 0.3 * position_intensity,
+                'extreme_range': (0.3 * position_intensity, 0.8 * position_intensity)
             },
             
             # 높이 랜덤성
             'height': {
-                'base_noise': 0.12 * final_intensity,
-                'extreme_prob': 0.25 * global_intensity,
+                'base_noise': 0.12 * height_intensity,
+                'extreme_prob': 0.25 * height_intensity,
                 'extreme_values': [0.15, 0.18, 0.45, 0.50, 0.8, 0.9]  # 절대값이므로 그대로 유지
             },
             
@@ -691,14 +693,12 @@ class BipedWalkingReward:
             'front_feet_up': 2.0,
             'leg_extension': 1.5,
             'swing_speed_reward': 1.5,
+            'leg_posture_hierarchy': 1.5,  # ✅ [추가] 다리 자세 계층 구조 보상 가중치
 
             # --- 2. 동적 안정성 및 걷기 보상 ---
             'forward_velocity': 3.0,
             'stepping': 4.0,
-            
-            # ✅ [수정] '제자리 유지'를 '무게중심 안정성'으로 대체했습니다.
-            'com_stability': 2.5,            # 무게중심을 지지 기반 위에 안정적으로 유지
-            
+            'com_stability': 2.5,
             'angular_velocity_reward': 2.0,
 
             # --- 3. 페널티 ---
@@ -727,15 +727,12 @@ class BipedWalkingReward:
         trunk_quat = data.qpos[3:7]
         trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
         trunk_height = data.qpos[2]
-        
-        # ✅ [핵심 수정] is_contact를 모든 관련 로직보다 먼저 정의합니다.
         rear_feet_contact = np.array(RobotPhysicsUtils.get_rear_feet_contact(model, data))
         is_contact = rear_feet_contact > 0.1
 
         ##############################################################
         ### --- 1단계: 안정적인 자세 유지 (핵심 보상) --- ###
         ##############################################################
-        # 이 부분은 이전과 동일합니다.
         total_reward += self.weights['survival_bonus']
         reward_info['reward_survival'] = self.weights['survival_bonus']
         
@@ -765,11 +762,29 @@ class BipedWalkingReward:
         leg_extension_reward = avg_leg_extension * self.weights['leg_extension']
         total_reward += leg_extension_reward
         reward_info['reward_leg_extension'] = leg_extension_reward
+
+        # ✅ --- [추가] 고관절 > 무릎 > 발 높이 순서 보상 ---
+        leg_posture_reward = 0.0
+        # leg_pos는 위에서 이미 계산됨
+        for i in range(2):  # 0: Right-Rear, 1: Left-Rear
+            hip_z = leg_pos['hip'][i][2]
+            knee_z = leg_pos['knee'][i][2]
+            foot_z = leg_pos['foot'][i][2]
+
+            # 고관절이 무릎보다 높은지 확인 (차이가 클수록 좋음)
+            leg_posture_reward += np.tanh(max(0, hip_z - knee_z)) * 0.25
+            
+            # 무릎이 발보다 높은지 확인 (차이가 클수록 좋음)
+            leg_posture_reward += np.tanh(max(0, knee_z - foot_z)) * 0.25
+        
+        # leg_posture_reward는 최대 0.5 (tanh의 최대값은 1)
+        final_leg_posture_reward = leg_posture_reward * self.weights['leg_posture_hierarchy']
+        total_reward += final_leg_posture_reward
+        reward_info['reward_leg_posture'] = final_leg_posture_reward
         
         #####################################################################
         ### --- 2단계: 동적 안정성 및 걷기 학습 --- ###
         #####################################################################
-        # 무게중심 보상 로직 (이전과 동일)
         rear_feet_pos = RobotPhysicsUtils.get_rear_feet_positions(model, data)
         support_center = np.mean(rear_feet_pos, axis=0)
         com_xy = data.qpos[:2]
@@ -778,13 +793,11 @@ class BipedWalkingReward:
         total_reward += com_stability_reward
         reward_info['reward_com_stability'] = com_stability_reward
         
-        # 각속도 보상 로직 (이전과 동일)
         angular_vel = np.linalg.norm(data.qvel[3:5])
         angular_velocity_reward = np.tanh(angular_vel) * self.weights['angular_velocity_reward']
         total_reward += angular_velocity_reward
         reward_info['reward_angular_velocity'] = angular_velocity_reward
         
-        # [보상] 발 내딛기 (Stepping) - 미리 정의된 is_contact 사용
         first_contact = (self.rear_feet_air_time > 0.0) & is_contact
         self.rear_feet_air_time += dt
         stride_time = np.clip(self.rear_feet_air_time, 0.1, 0.4)
@@ -793,7 +806,6 @@ class BipedWalkingReward:
         total_reward += stepping_reward
         reward_info['reward_stepping'] = stepping_reward
         
-        # [보상] 스윙 속도 보상 - 미리 정의된 is_contact 사용
         is_airborne = ~np.array(is_contact, dtype=bool) 
         swing_speed_reward = 0.0
         if np.any(is_airborne):
@@ -804,9 +816,10 @@ class BipedWalkingReward:
             swing_speed_reward = np.tanh(avg_swing_speed) * self.weights.get('swing_speed_reward', 0.0)
         total_reward += swing_speed_reward
         reward_info['reward_swing_speed'] = swing_speed_reward
-
-        # 커리큘럼 및 페널티 로직 (이후는 이전과 동일)
-        # ... (이하 모든 코드는 이전 버전과 동일하게 유지됩니다)
+        
+        #####################################################################
+        ### --- 3단계: 커리큘럼 및 페널티 --- ###
+        #####################################################################
         if total_timesteps > 1_000_000:
             self.target_forward_velocity = 0.5
         
@@ -896,6 +909,40 @@ class Go1StandingEnv(Go1MujocoEnv):
                 shape=self._get_extended_obs().shape, 
                 dtype=np.float64
             )
+
+
+
+    def _ensure_rear_feet_contact(self):
+        """뒷발이 지면에 접촉하도록 로봇 높이 자동 조정"""
+        try:
+            # 뒷발의 위치 확인
+            rear_foot_names = ["RR", "RL"]
+            foot_positions_z = []
+            
+            for foot_name in rear_foot_names:
+                try:
+                    foot_site_id = self.model.site(foot_name).id
+                    foot_pos = self.data.site_xpos[foot_site_id]
+                    foot_positions_z.append(foot_pos[2])  # z 좌표만
+                except:
+                    continue
+            
+            if foot_positions_z:
+                # 가장 낮은 발의 z 좌표
+                lowest_foot_z = min(foot_positions_z)
+                
+                # 지면(z=0)에서 0.5cm 위에 발이 오도록 조정
+                target_clearance = 0.005
+                height_adjustment = target_clearance - lowest_foot_z
+                
+                # 트렁크 높이 조정
+                self.data.qpos[2] += height_adjustment
+                
+                # 물리 시뮬레이션 재적용
+                mujoco.mj_forward(self.model, self.data)
+                
+        except Exception as e:
+            print(f"⚠️ 뒷발 높이 자동 조정 실패: {e}")
 
     def _get_adaptive_noise_scale(self):
         """훈련 진행도에 따라 노이즈 스케일을 점진적으로 감소"""
@@ -1055,10 +1102,10 @@ class Go1StandingEnv(Go1MujocoEnv):
         config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=2.5)
         
         # 위치 랜덤화
-        RobotPhysicsUtils.apply_random_position(self.data, config)
+        #RobotPhysicsUtils.apply_random_position(self.data, config)
         
         # 높이 랜덤화 (2족용)
-        RobotPhysicsUtils.apply_random_height(self.data, base_height=0.62, config=config)
+        #RobotPhysicsUtils.apply_random_height(self.data, base_height=0.62, config=config)
         
         # 자세 랜덤화 (2족용 pitch)
         RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=-1.95, config=config)
@@ -1078,9 +1125,14 @@ class Go1StandingEnv(Go1MujocoEnv):
         # 물리 시뮬레이션 적용
         mujoco.mj_forward(self.model, self.data)
         
+        # [수정] 불안정성 체크 로직 이전에 뒷발 접지를 먼저 수행하여 안정적인 시작 자세 보장
+        self._ensure_rear_feet_contact()
+        
         # 30% 확률로만 안정성 체크 (전역 강도에 따라 조정)
         if np.random.random() < 0.5 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY and self._is_initial_pose_unstable():
             self._set_bipedal_ready_pose_conservative()
+            # 보수적인 자세 설정 후에도 다시 한번 접지 확인
+            self._ensure_rear_feet_contact()
 
     def get_pose_info(self):
         """현재 자세 정보 반환 (디버깅용)"""
@@ -1414,8 +1466,8 @@ class BipedalWalkingEnv(Go1StandingEnv):
         """2족 보행용 종료 조건 (높이 체크 제거, 감점으로 대체)"""
         
         # ✅ [제거] 상체 높이 체크 로직을 제거하여, 낮은 자세는 페널티로만 처리되도록 함
-        # if self.data.qpos[2] < 0.25:
-        #     return True, "height_too_low"
+        if self.data.qpos[2] < 0.25:
+             return True, "height_too_low"
         
         # 2. 기울기 체크 (유지)
         trunk_quat = self.data.qpos[3:7]
