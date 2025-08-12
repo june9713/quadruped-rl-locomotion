@@ -24,9 +24,13 @@ import pandas as pd
 from visual_training_callback import VisualTrainingCallback, VideoRecordingCallback, EnhancedVisualCallback
 import torch
 import glob
+from stable_baselines3.common.noise import NormalActionNoise
+from stable_baselines3.common.callbacks import BaseCallback
+import numpy as np
 from collections import deque, defaultdict
 try:
-    from go1_standing_env import Go1StandingEnv, GradualStandingEnv, BipedalWalkingEnv, BipedalCurriculumEnv, RobotPhysicsUtils
+    # 'Go1BipedalEnv'를 'BipedalWalkingEnv'로 수정
+    from go1_standing_env import BipedalWalkingEnv, BipedalCurriculumEnv, RobotPhysicsUtils
 except ImportError:
     print("⚠️ go1_standing_env.py 파일이 필요합니다!")
     raise
@@ -155,7 +159,7 @@ def create_optimized_ppo_model(env, args, device, tensorboard_log=None):
             'vf_coef': 0.5,
             'max_grad_norm': 1.0,
             'policy_kwargs': dict(
-                net_arch=[dict(pi=[1024, 512, 256], vf=[1024, 512, 256])],
+                net_arch=dict(pi=[1024, 512, 256], vf=[1024, 512, 256]),
                 activation_fn=torch.nn.ReLU,
                 ortho_init=True,
                 log_std_init=-2.0
@@ -182,7 +186,7 @@ def create_optimized_ppo_model(env, args, device, tensorboard_log=None):
             'vf_coef': 0.7,
             'max_grad_norm': 0.5,
             'policy_kwargs': dict(
-                net_arch=[dict(pi=[512, 256], vf=[512, 256])],
+                net_arch=dict(pi=[512, 256], vf=[512, 256]),
                 activation_fn=torch.nn.ReLU,
                 ortho_init=True,
                 log_std_init=-2.0
@@ -201,6 +205,8 @@ def create_optimized_ppo_model(env, args, device, tensorboard_log=None):
     )
     
     return model
+
+
 
 # StandingTrainingCallback 클래스는 변경 사항 없음 (생략)
 class StandingTrainingCallback(BaseCallback):
@@ -301,8 +307,11 @@ def load_compiled_model(model_path, env, device):
     
     # 2. 모델의 하이퍼파라미터로 새로운 PPO 모델을 생성합니다.
     #    이렇게 하면 올바른 신경망 구조를 가진 모델이 만들어집니다.
+    # 'policy_class' 키가 없는 경우에 대비하여 기본값 "MlpPolicy" 사용
+    policy_class = params.get("policy_class", "MlpPolicy")
+
     model = PPO(
-        policy=params["policy_class"],
+        policy=policy_class,
         env=env,
         device=device,
         _init_setup_model=False, # 모델을 바로 초기화하지 않음
@@ -347,12 +356,24 @@ def train_with_optimized_parameters(args):
     print(f"\n🚀 2족 보행 최적화 훈련 시작! (task={args.task})")
     
     training_time = 0.0
-    randomness_intensity = args.randomness_intensity
+    
+    # ✅ [수정] 이 부분은 메인 프로세스의 로그 확인용으로 유지하되, 실제 설정은 아래 env_kwargs를 통해 전달됩니다.
     RobotPhysicsUtils.set_randomness_intensity(args.randomness_intensity)
     print(f"🎛️ 랜덤성 강도 설정: {args.randomness_intensity}")
 
-    env_class = BipedalWalkingEnv if args.task == "standing" else Go1MujocoEnv
-    env_kwargs = {'randomize_physics': True}
+    if args.use_curriculum:
+        env_class = BipedalCurriculumEnv
+        print("🎓 커리큘럼 모드로 훈련을 시작합니다.")
+    else:
+        # 기본 2족 보행 환경
+        # 'Go1BipedalEnv'를 'BipedalWalkingEnv'로 수정
+        env_class = BipedalWalkingEnv
+    
+    # ✅ [수정] 멀티프로세싱을 위해 env_kwargs에 randomness_intensity를 추가합니다.
+    env_kwargs = {
+        'randomize_physics': True,
+        'randomness_intensity': args.randomness_intensity
+    }
     print(f"🎯 훈련 환경: {env_class.__name__}")
 
     use_pretrained = False
@@ -369,7 +390,12 @@ def train_with_optimized_parameters(args):
         StandingTrainingCallback(args, eval_env)
     ]
     if args.video_interval > 0:
-        record_env = DummyVecEnv([lambda: env_class(render_mode="rgb_array", **env_kwargs)])
+        # ✅ [수정] 비디오 녹화용 환경에도 randomness_intensity를 전달합니다.
+        record_env_kwargs = {
+            'render_mode': "rgb_array", 
+            'randomness_intensity': args.randomness_intensity
+        }
+        record_env = DummyVecEnv([lambda: env_class(**record_env_kwargs)])
         callbacks.append(
             VideoRecordingCallback(record_env, record_interval_timesteps=args.video_interval, video_folder=f"eval_videos_{args.task}", show_duration_seconds=args.show_duration)
         )
@@ -441,7 +467,7 @@ def train_with_optimized_parameters(args):
         f.write(f"Total timesteps: {args.total_timesteps:,}\n")
         f.write(f"Training time: {training_time/3600:.2f} hours\n")
         f.write(f"Used pretrained model: {use_pretrained}\n")
-        f.write(f"Randomness intensity: {randomness_intensity}\n")  # ✅ 랜덤성 강도 기록
+        f.write(f"Randomness intensity: {args.randomness_intensity}\n")
         if use_pretrained:
             f.write(f"Pretrained model path: {pretrained_model_path}\n")
         f.write(f"Environment observation mode: {'Base(45dim)' if env_kwargs.get('use_base_observation', False) else 'Extended(56dim)'}\n")
@@ -534,14 +560,13 @@ def train_with_optimized_parameters(args):
     
     # ✅ [수정] --use_curriculum 플래그에 따라 환경을 선택하도록 변경
     if args.use_curriculum:
-        # 커리큘럼 플래그가 있으면 BipedalCurriculumEnv 사용
-        env_class = BipedalCurriculumEnv 
-        print("🎓 커리큘럼 모드로 훈련을 시작합니다. (BipedalCurriculumEnv)")
+        env_class = BipedalCurriculumEnv
+        print("🎓 커리큘럼 모드로 훈련을 시작합니다.")
     else:
-        # 기본 모드
-        env_class = BipedalWalkingEnv if args.task == "standing" else Go1MujocoEnv
+        # 기본 2족 보행 환경
+        env_class = BipedalWalkingEnv
 
-    env_kwargs = {'randomize_physics': True}
+    env_kwargs = {'randomize_physics': True, 'randomness_intensity': args.randomness_intensity}
     print(f"🎯 훈련 환경: {env_class.__name__}")
     
     if not use_pretrained and args.pretrained_model:

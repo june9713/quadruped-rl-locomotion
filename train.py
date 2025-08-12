@@ -11,6 +11,21 @@ from stable_baselines3.common.env_util import make_vec_env
 from go1_mujoco_env import Go1MujocoEnv
 from tqdm import tqdm
 
+import argparse
+import os
+import time
+from pathlib import Path
+
+import gymnasium as gym
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.env_util import make_vec_env
+from go1_mujoco_env import Go1MujocoEnv
+from tqdm import tqdm
+from stable_baselines3.common.callbacks import CallbackList
+from training_callback import VideoRecordingCallback # VisualTrainingCallback import 추가
+
 MODEL_DIR = "models"
 LOG_DIR = "logs"
 
@@ -22,6 +37,15 @@ def train(args):
         n_envs=args.num_parallel_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
+    )
+    
+    # 비디오 녹화용 단일 환경 생성
+    record_env = Go1MujocoEnv(
+        ctrl_type=args.ctrl_type,
+        render_mode="rgb_array",
+        camera_name="tracking",
+        width=1024,
+        height=768,
     )
 
     train_time = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -46,6 +70,16 @@ def train(args):
         deterministic=True,
         render=False,
     )
+    
+    # 비디오 녹화 콜백 설정 (100,000 타임스텝마다 15초간 녹화)
+    video_callback = VideoRecordingCallback(
+        record_env=record_env,
+        record_interval_timesteps=500_000,
+        show_duration_seconds=10
+    )
+    
+    # 여러 콜백을 함께 사용하기 위해 CallbackList로 묶음
+    callback_list = CallbackList([eval_callback, video_callback])
 
     if args.model_path is not None:
         model = PPO.load(
@@ -61,7 +95,7 @@ def train(args):
         reset_num_timesteps=False,
         progress_bar=True,
         tb_log_name=run_name,
-        callback=eval_callback,
+        callback=callback_list, # CallbackList로 교체
     )
     # Save final model
     model.save(f"{model_path}/final_model")
@@ -171,7 +205,7 @@ if __name__ == "__main__":
         "--ctrl_type",
         type=str,
         choices=["torque", "position"],
-        default="torque",
+        default="position",
         help="Whether the model should control the robot using torque or position control.",
     )
     parser.add_argument("--seed", type=int, default=0)

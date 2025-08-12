@@ -7,6 +7,7 @@ recordings/
 eval_videos/
 eval_videos_*/
 training_reports_*/
+training_videos/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -12,10 +12,10 @@ from gymnasium import spaces
 import os
 from scipy.spatial.transform import Rotation
 from stable_baselines3 import PPO
-
+import traceback
 
 # visual_train.py에서 import할 수 있도록 환경 이름 추가
-__all__ = ['Go1StandingEnv', 'GradualStandingEnv', 'QuadWalkingReward', 
+__all__ = [
            'BipedWalkingReward', 'BipedalWalkingEnv', 'BipedalCurriculumEnv',
            'create_compatible_env']
 
@@ -44,6 +44,55 @@ class RobotPhysicsUtils:
         0.0, 2.5, -1.0,     # RL
     ])
 
+    @staticmethod
+    def set_random_joint_angles(data, model):
+        """
+        (사용자 요청) 매 스텝마다 각 관절의 '각도(위치)'를 관절 범위 내의
+        완전히 새로운 랜덤 값으로 '설정'합니다.
+        """
+        try:
+            # 12개 관절의 위치(qpos) 인덱스는 7부터 18까지입니다.
+            # 해당 관절의 범위(jnt_range)는 model.jnt_range[1:]에 해당합니다 (root joint 제외).
+            joint_ranges = model.jnt_range[1:]
+            
+            # 각 관절의 유효 범위 내에서 독립적인 랜덤 각도를 생성합니다.
+            random_angles = np.random.uniform(low=joint_ranges[:, 0], high=joint_ranges[:, 1])
+            
+            # 계산된 랜덤 각도를 관절 위치(qpos)에 직접 덮어씁니다.
+            data.qpos[7:19] = random_angles
+        except Exception as e:
+            # 함수가 실패하더라도 시뮬레이션이 중단되지 않도록 방지
+            pass
+
+
+    @staticmethod
+    def apply_step_joint_velocity_noise(data, total_timesteps, max_training_timesteps):
+        """
+        (대폭 수정) 매 스텝마다 로봇 관절에 '매우 강하고 예측 불가능한' 속도 노이즈를 가하여,
+        극단적인 상황에 대한 대처 능력을 학습시킵니다.
+        """
+        intensity = RobotPhysicsUtils.get_randomness_intensity()
+        if intensity <= 0.0:
+            return
+
+        # ✅ [수정] 확률적 적용을 제거하고 '매 스텝마다' 노이즈를 적용합니다.
+        # 훈련 진행도에 따른 감소는 유지하되, 노이즈의 기본 크기를 대폭 상향합니다.
+        progress = min(1.0, total_timesteps / max_training_timesteps)
+        
+        try:
+            # ✅ [수정] 노이즈 기본 크기를 0.75 -> 2.5로 대폭 상향하여 격렬한 움직임을 만듭니다.
+            # 훈련 초반(progress=0)에 매우 강한 노이즈를 인가하고, 훈련이 진행되면 점차 줄여나갑니다.
+            max_noise_magnitude = 2.5 * intensity * (1 - progress**2) 
+            
+            # 12개 관절에 대한 랜덤 속도 노이즈 생성
+            joint_vel_noise = np.random.uniform(-max_noise_magnitude, max_noise_magnitude, 12)
+
+            # 기존 관절 속도에 노이즈를 더해 강제로 움직임을 망가뜨립니다.
+            data.qvel[6:] += joint_vel_noise
+            
+        except Exception as e:
+            # 함수가 실패하더라도 시뮬레이션이 중단되지 않도록 방지
+            print(traceback.format_exc())
 
     @staticmethod
     def get_rear_feet_velocities(model, data):
@@ -130,7 +179,7 @@ class RobotPhysicsUtils:
     @staticmethod
     def get_enhanced_randomness_config(progress=1.0, intensity_multiplier=1.0):
         """
-        통합 랜덤성 설정 반환 - 전역 강도 적용
+        통합 랜덤성 설정 반환 - 전역 강도 적용 (수정된 버전)
         
         Args:
             progress: 훈련 진행도 (0.0 ~ 1.0)
@@ -149,67 +198,183 @@ class RobotPhysicsUtils:
         # 기본 노이즈 스케일 (진행도에 따라 감소)
         base_noise = 1.0 - 0.5 * progress  # 1.0 → 0.5
         final_intensity = base_noise * intensity_multiplier * global_intensity
-        height_intensity = 1.0
-        position_intensity = 1.0
+        
+        # ⚠️ [수정] 위치/높이 랜덤성 대폭 축소. 평평한 지형에서는 큰 의미가 없기 때문입니다.
+        #    대신 자세, 관절, 물리 랜덤성에 집중하여 강인한 정책을 학습합니다.
+        position_intensity = 0.1 # 기존 1.0 -> 0.1 (90% 감소)
+        height_intensity = 0.2   # 기존 1.0 -> 0.2 (80% 감소)
         
         return {
-            # 위치 랜덤성
+            # 위치 랜덤성 (매우 약하게 설정)
             'position': {
-                'base_noise': 0.15 * position_intensity,
-                'extreme_prob': 0.3 * position_intensity,
-                'extreme_range': (0.3 * position_intensity, 0.8 * position_intensity)
+                'base_noise': 0.05 * position_intensity,
+                'extreme_prob': 0.1 * position_intensity,
+                'extreme_range': (0.1 * position_intensity, 0.2 * position_intensity)
             },
             
-            # 높이 랜덤성
+            # 높이 랜덤성 (매우 약하게 설정)
             'height': {
-                'base_noise': 0.12 * height_intensity,
-                'extreme_prob': 0.25 * height_intensity,
-                'extreme_values': [0.15, 0.18, 0.45, 0.50, 0.8, 0.9]  # 절대값이므로 그대로 유지
+                'base_noise': 0.05 * height_intensity,
+                'extreme_prob': 0.1 * height_intensity,
+                'extreme_values': [0.28, 0.32, 0.58, 0.65] 
             },
             
-            # 자세 랜덤성 (각도)
+            # 자세 랜덤성 (각도) - 중요하므로 유지 및 강화
             'orientation': {
-                'base_noise': 0.5 * final_intensity,
+                'base_noise': 0.6 * final_intensity,
                 'extreme_prob': 0.3 * global_intensity,
-                'extreme_range': (-0.8 * global_intensity, 0.8 * global_intensity),
-                'flip_prob': 0.03 * global_intensity
+                'extreme_range': (-0.9 * global_intensity, 0.9 * global_intensity),
+                'flip_prob': 0.02 * global_intensity # 뒤집힐 확률은 낮춤
             },
             
-            # 관절 랜덤성
+            # 관절 랜덤성 - 중요하므로 유지 및 강화
             'joints': {
-                'base_noise': 1.5 * final_intensity,
+                'base_noise': 1.8 * final_intensity,
                 'extreme_prob': 0.4 * global_intensity,
-                'extreme_multiplier': (2.0 * global_intensity, 5.0 * global_intensity),
+                'extreme_multiplier': (2.5 * global_intensity, 6.0 * global_intensity),
                 'pattern_prob': 0.6 * global_intensity
             },
             
             # 속도 랜덤성
             'velocity': {
-                'base_noise': 0.1 * final_intensity,
+                'base_noise': 0.15 * final_intensity,
                 'extreme_prob': 0.3 * global_intensity,
-                'extreme_range': (1.0 * global_intensity, 4.0 * global_intensity)
+                'extreme_range': (1.5 * global_intensity, 4.5 * global_intensity)
             },
             
-            # 물리 파라미터 랜덤성
+            # 물리 파라미터 랜덤성 - 중요하므로 유지
             'physics': {
                 'apply_prob': 0.8 * global_intensity,
                 'gravity_range': (
-                    1.0 - 0.2 * global_intensity,  # 0.8 ~ 1.0
-                    1.0 + 0.2 * global_intensity   # 1.0 ~ 1.2
+                    1.0 - 0.2 * global_intensity,
+                    1.0 + 0.2 * global_intensity
                 ),
                 'friction_range': (
-                    1.0 - 0.4 * global_intensity,  # 0.6 ~ 1.0
-                    1.0 + 0.4 * global_intensity   # 1.0 ~ 1.4
+                    1.0 - 0.4 * global_intensity,
+                    1.0 + 0.4 * global_intensity
                 ),
                 'mass_range': (
-                    1.0 - 0.15 * global_intensity, # 0.85 ~ 1.0
-                    1.0 + 0.15 * global_intensity  # 1.0 ~ 1.15
+                    1.0 - 0.15 * global_intensity,
+                    1.0 + 0.15 * global_intensity
                 ),
                 'extreme_prob': 0.15 * global_intensity
             }
         }
 
+
+
+    @staticmethod
+    def apply_adaptive_step_noise(data, model, total_timesteps, max_training_timesteps):
+        """
+        (수정) 훈련 진행도에 따라 노이즈 종류와 강도를 점진적으로 변경합니다.
+        - 초기: '물리 기반 토크 충격'으로 관절을 흔들어 강한 탐험 유도
+        - 후기: 물리 기반 속도 노이즈 및 외력 (안정화 및 세밀한 제어 학습)
+        """
+        # =========================================================================
+        # ✅ [사용자 요청] 랜덤 확률 기반으로 노이즈 적용 여부 결정
+        # 아래 apply_prob 값을 조절하여 노이즈가 적용될 확률을 테스트할 수 있습니다.
+        # (예: 1.0 = 매번 적용, 0.7 = 70% 확률로 적용, 0.1 = 10% 확률로 적용)
+        # =========================================================================
+        apply_prob = 0.5  # <--- 이 값을 수정하여 확률을 직접 테스트하세요.
+        if np.random.random() > apply_prob:
+            return # 설정된 확률에 따라 노이즈를 적용하지 않고 건너뜁니다.
+
+
+        intensity = RobotPhysicsUtils.get_randomness_intensity()
+        if intensity <= 0.0:
+            return
+
+        # 1. 훈련 진행도 계산 (0.0에서 1.0으로 증가)
+        progress = min(1.0, total_timesteps / max_training_timesteps)
+
+        # 2. 노이즈 가중치 계산
+        # 초반에 강하고 빠르게 감소하는 '초기 탐험용' 노이즈 가중치
+        initial_exploration_weight = (1.0 - progress)**3
+        # 서서히 강해지는 '물리 기반' 노이즈 가중치
+        physical_noise_weight = progress
+
+        # --- [핵심 수정] '관절 위치 강제 변경' 대신 '관절 토크(힘) 적용' 방식 (훈련 초반 집중) ---
+        if initial_exploration_weight > 0.01: # 가중치가 거의 0이면 연산 생략
+            try:
+                # 1. 관절에 가할 '충격'의 기본 크기를 설정합니다.
+                #    이 값은 로봇의 PD 제어기를 이겨내고 움직임을 만들어낼 만큼 충분히 커야 합니다.
+                #    이 값은 튜닝이 필요한 하이퍼파라미터입니다.
+                force_magnitude = 50.0 * initial_exploration_weight * intensity
+                
+                # 2. 12개 관절에 대해 [-force_magnitude, force_magnitude] 범위의 독립적인 랜덤 토크를 생성합니다.
+                joint_force_shock = np.random.uniform(-force_magnitude, force_magnitude, 12)
+                
+                # 3. 계산된 랜덤 토크를 data.qfrc_applied에 더해줍니다.
+                #    qfrc_applied는 MuJoCo가 매 스텝 계산하는 제어 토크에 추가적인 외력을 더하는 역할을 합니다.
+                #    이는 물리적으로 타당한 방식으로 관절에 '충격'을 주는 것과 같습니다.
+                data.qfrc_applied[0:12] += joint_force_shock
+
+            except Exception:
+                # 함수가 실패하더라도 시뮬레이션이 중단되지 않도록 방지
+                pass
+
+        # --- 물리 기반 노이즈 (훈련 후반에 집중) ---
+        if physical_noise_weight > 0.01: # 가중치가 거의 0이면 연산 생략
+            # 가. 속도 노이즈
+            try:
+                # 기존 속도 노이즈 크기에 physical_noise_weight를 곱해 강도를 점진적으로 높입니다.
+                max_vel_noise = 2.5 * intensity * physical_noise_weight
+                joint_vel_noise = np.random.uniform(-max_vel_noise, max_vel_noise, 12)
+                data.qvel[6:] += joint_vel_noise
+            except Exception:
+                pass
+            
+            # 나. 몸통 외력 (기존 코드 유지)
+            try:
+                pass
+                # 외력이 가해질 확률과 크기 역시 physical_noise_weight에 비례하여 점진적으로 높입니다.
+                #perturb_prob = 0.05 * intensity * physical_noise_weight
+                #if np.random.random() < perturb_prob:
+                    #trunk_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trunk")
+                    #if trunk_id != -1:
+                        #max_force = 75.0 * intensity * physical_noise_weight
+                        #force = np.random.uniform(-max_force, max_force, 3)
+                        #force[2] *= 0.2
+                        #data.xfrc_applied[trunk_id, :3] += force
+            except Exception:
+                pass
+
     
+    @staticmethod
+    def apply_step_perturbations(model, data):
+        """
+        매 스텝마다 로봇 몸통에 랜덤한 외력을 가하여 동적 안정성 학습을 강화합니다.
+        (새로 추가된 함수)
+        """
+        intensity = RobotPhysicsUtils.get_randomness_intensity()
+        if intensity <= 0.0:
+            return
+
+        # 외력을 가할 확률 (너무 자주 가하면 학습이 불안정해질 수 있음)
+        # 강도 1.0 기준, 5% 확률로 외력 적용
+        perturb_prob = 0.05 * intensity 
+        if np.random.random() > perturb_prob:
+            return
+            
+        try:
+            trunk_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trunk")
+            if trunk_id == -1:
+                return
+
+            # 외력의 최대 크기 (강도에 비례)
+            max_force = 75.0 * intensity  # 2족 보행 시 강하게 밀리도록 상향 조정
+            
+            # 랜덤한 방향으로 힘 생성
+            #force = np.random.uniform(-max_force, max_force, 3)
+            #force[2] *= 0.2 # 수직 방향 힘은 약하게 적용 (주로 수평으로 밀도록)
+
+            # 기존 외력에 추가 (덮어쓰지 않음)
+            #data.xfrc_applied[trunk_id, :3] += force
+            
+        except Exception as e:
+            # 함수가 실패하더라도 시뮬레이션이 중단되지 않도록 방지
+            pass
+
 
     @staticmethod
     def _get_zero_randomness_config():
@@ -488,6 +653,33 @@ class RobotPhysicsUtils:
             [2 * x * y + 2 * w * z, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * w * x],
             [2 * x * z - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y]
         ])
+
+    @staticmethod
+    def apply_step_joint_position_noise(data, total_timesteps, max_training_timesteps):
+        """
+        (신규 추가) 매 스텝마다 로봇 관절 '위치'에 직접 노이즈를 가하여,
+        수동적인 자세를 적극적으로 방해하고 강인한 복원력을 학습시킵니다.
+        """
+        intensity = RobotPhysicsUtils.get_randomness_intensity()
+        if intensity <= 0.0:
+            return
+
+        progress = min(1.0, total_timesteps / max_training_timesteps)
+        
+        try:
+            # 위치(각도)에 대한 노이즈이므로 속도 노이즈보다 훨씬 작은 값을 사용해야 합니다.
+            # 0.05 rad는 약 2.8도에 해당하며, intensity와 곱해져 효과를 냅니다.
+            max_noise_magnitude = 0.05 * intensity * (1 - progress**2)
+            
+            joint_pos_noise = np.random.uniform(-max_noise_magnitude, max_noise_magnitude, 12)
+
+            # 기존 관절 위치(qpos)에 직접 노이즈를 더해 자세를 강제로 계속 바꿉니다.
+            # 이는 물리적으로는 부정확하지만, 에이전트가 특정 자세에 안주하는 것을 방지하는 강력한 수단입니다.
+            data.qpos[7:19] += joint_pos_noise
+            
+        except Exception as e:
+            # 함수가 실패하더라도 시뮬레이션이 중단되지 않도록 방지
+            pass
     
     @staticmethod
     def get_foot_contacts(model, data):
@@ -583,99 +775,6 @@ class RobotPhysicsUtils:
                 rear_contacts.append(0.0)
         return rear_contacts
 
-
-class QuadWalkingReward:
-    """4족 정상 서있기를 위한 보상 함수"""
-
-    def __init__(self):
-        # 보상 가중치들 - 4족 서있기 최적화
-        self.weights = {
-            'upright': 12.0,        # 똑바로 서있기
-            'height': 8.0,          # 적절한 높이 유지 (4족 기준)
-            'balance': 10.0,        # 균형 유지
-            'foot_contact': 8.0,    # 모든 발이 지면에 접촉
-            'forward_vel': 0.0,     # 전진 속도 - 제거 (제자리 서기)
-            'lateral_stability': 6.0, # 좌우 안정성
-            'energy': -0.03,        # 에너지 효율
-            'joint_limit': -3.0,    # 관절 한계 페널티
-            'symmetry': 4.0,        # 좌우 대칭성
-            'smooth_motion': 3.0    # 부드러운 동작
-        }
-
-    def compute_reward(self, model, data, action):
-        """4족 보행 보상 계산"""
-        total_reward = 0.0
-        reward_info = {}
-
-        # --- 1. 주요 물리량 사전 계산 ---
-        trunk_quat = data.qpos[3:7]
-        trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2] # 로봇의 Z축 벡터 (up-vector)
-        
-        # Pitch 각도 계산 (4족 보행에서 중요)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[0, 2])
-        
-        trunk_height = data.qpos[2]
-        com_position = RobotPhysicsUtils.get_com_position(model, data)
-        
-        front_feet_heights = RobotPhysicsUtils.get_front_feet_heights(model, data)
-        rear_feet_positions = RobotPhysicsUtils.get_rear_feet_positions(model, data)
-
-        # --- 2. 핵심 보상 (Positive Rewards) ---
-
-        # [보상 1] 상체 직립 (Torso Upright) - 4족 보행용
-        upright_reward = up_vector[2]
-        total_reward += self.weights['upright'] * upright_reward
-        reward_info['reward_upright'] = upright_reward * self.weights['upright']
-
-        # [보상 2] 목표 높이 유지 (Height) - 4족 보행 높이
-        target_height = 0.55  # 4족 보행 목표 높이
-        height_error = abs(trunk_height - target_height)
-        height_reward = np.exp(-15 * height_error)
-        total_reward += self.weights['height'] * height_reward
-        reward_info['reward_height'] = height_reward * self.weights['height']
-
-        # [보상 3] 무게중심 안정성 (CoM over Support Polygon)
-        support_center = np.mean(rear_feet_positions, axis=0)
-        com_xy = com_position[:2]
-        com_error = np.linalg.norm(com_xy - support_center)
-        com_reward = np.exp(-15 * com_error)
-        total_reward += self.weights['balance'] * com_reward
-        reward_info['reward_com_support'] = com_reward * self.weights['balance']
-        
-        # [보상 4] 발 접촉 (Foot Contact) - 4족 보행에서는 모든 발이 접촉
-        foot_contacts = RobotPhysicsUtils.get_foot_contacts(model, data)
-        contact_reward = np.mean(foot_contacts)
-        total_reward += self.weights['foot_contact'] * contact_reward
-        reward_info['reward_foot_contact'] = contact_reward * self.weights['foot_contact']
-
-        # --- 3. 페널티 (Negative Rewards) ---
-        # [페널티 1] 과도한 상체 회전 속도 (Angular Velocity)
-        angular_vel_penalty = np.sum(np.square(data.qvel[3:6]))
-        total_reward += self.weights['energy'] * angular_vel_penalty
-        reward_info['penalty_angular_vel'] = self.weights['energy'] * angular_vel_penalty
-        
-        # [페널티 2] 불필요한 수평 이동 (Horizontal Velocity)
-        horizontal_vel_penalty = np.sum(np.square(data.qvel[:2]))
-        total_reward += self.weights['energy'] * horizontal_vel_penalty
-        reward_info['penalty_horizontal_vel'] = self.weights['energy'] * horizontal_vel_penalty
-        
-        # [페널티 3] 관절 한계 (Joint Limit)
-        joint_pos = data.qpos[7:]
-        joint_ranges = model.jnt_range[1:]
-        limit_penalty = 0.0
-        for i, pos in enumerate(joint_pos):
-            if pos < joint_ranges[i, 0] * 0.95:
-                limit_penalty += (joint_ranges[i, 0] - pos)**2
-            elif pos > joint_ranges[i, 1] * 0.95:
-                limit_penalty += (pos - joint_ranges[i, 1])**2
-        total_reward += self.weights['joint_limit'] * limit_penalty
-        reward_info['penalty_joint_limit'] = self.weights['joint_limit'] * limit_penalty
-
-        # [수정] max(0, total_reward)를 제거하여 음수 페널티가 에이전트에 전달되도록 함
-        # total_reward = max(0, total_reward) # <- 이 줄을 제거하거나 주석 처리
-
-        return total_reward, reward_info
 
 
 class BipedWalkingReward:
@@ -852,546 +951,36 @@ class BipedWalkingReward:
         return total_reward, reward_info
 
 
-class Go1StandingEnv(Go1MujocoEnv):
-    """4족 정상 서있기 환경 - 자연스러운 4족 자세에서 시작 (관찰 공간 호환성 개선)"""
+
+class BipedalWalkingEnv(Go1MujocoEnv):
+    """
+    2족 보행 전용 환경 (Go1StandingEnv 의존성 제거)
+    Go1MujocoEnv를 직접 상속받아 독립적으로 작동합니다.
+    """
 
     def __init__(self, **kwargs):
-
-
-        # 허용되지 않는 파라미터들 제거
+        # ------------------------------------------------------------------
+        # region: Go1StandingEnv의 __init__ 로직 병합
+        # ------------------------------------------------------------------
+        
+        # ✅ [수정] 멀티프로세싱 환경에서도 랜덤 강도가 올바르게 설정되도록 수정
+        # 환경 생성 시 전달된 'randomness_intensity' 값을 가져와 설정합니다.
+        # 이 코드를 통해 각 자식 프로세스가 자신의 랜덤 강도를 명확히 인지하게 됩니다.
+        randomness_intensity = kwargs.get('randomness_intensity', 1.5)
+        RobotPhysicsUtils.set_randomness_intensity(randomness_intensity)
+        
         filtered_kwargs = {}
         allowed_params = {
-            'randomize_physics', 'render_mode', 'frame_skip', 
+            'randomize_physics', 'render_mode', 'frame_skip',
             'observation_space', 'default_camera_config'
         }
-        
         for key, value in kwargs.items():
             if key in allowed_params:
                 filtered_kwargs[key] = value
-        
-        # ✅ 관찰 공간 호환성을 위한 설정
+
         self._use_base_observation = kwargs.get('use_base_observation', False)
         
-        # 부모 클래스 초기화 (필터링된 kwargs 사용)
-        super().__init__(**filtered_kwargs)
-        
-        # [수정] 존재하지 않는 StandingReward를 QuadWalkingReward로 수정
-        self.standing_reward = QuadWalkingReward()
-        self.episode_length = 0
-        self.max_episode_length = 1000
-
-        # 4족 서있기를 위한 건강 상태 조건
-        self._healthy_z_range = (0.22, 0.40)  # 4족 서있기 높이 범위
-        self._healthy_pitch_range = (-np.deg2rad(20), np.deg2rad(20))
-        self._healthy_roll_range = (-np.deg2rad(20), np.deg2rad(20))
-
-        # Domain randomization 설정
-        self.randomize_physics = kwargs.get('randomize_physics', True)
-        self.original_gravity = None
-
-        # ✅ 점진적 노이즈 감소를 위한 훈련 진행도 추적
-        self.total_timesteps = 0
-        self.max_training_timesteps = 5_000_000  # 예상 총 훈련 스텝
-        
-        # ✅ 관찰 공간 재설정
-        if self._use_base_observation:
-            # 기본 Go1MujocoEnv와 동일한 관찰 공간 사용 (45차원)
-            self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, 
-                shape=self._get_base_obs().shape, 
-                dtype=np.float64
-            )
-            print(f"🔄 호환 모드: 기본 관찰 공간({self._get_base_obs().shape[0]}차원) 사용")
-        else:
-            # 확장된 관찰 공간 사용 (56차원)
-            self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, 
-                shape=self._get_extended_obs().shape, 
-                dtype=np.float64
-            )
-
-
-
-    def _ensure_rear_feet_contact(self):
-        """뒷발이 지면에 접촉하도록 로봇 높이 자동 조정"""
-        try:
-            # 뒷발의 위치 확인
-            rear_foot_names = ["RR", "RL"]
-            foot_positions_z = []
-            
-            for foot_name in rear_foot_names:
-                try:
-                    foot_site_id = self.model.site(foot_name).id
-                    foot_pos = self.data.site_xpos[foot_site_id]
-                    foot_positions_z.append(foot_pos[2])  # z 좌표만
-                except:
-                    continue
-            
-            if foot_positions_z:
-                # 가장 낮은 발의 z 좌표
-                lowest_foot_z = min(foot_positions_z)
-                
-                # 지면(z=0)에서 0.5cm 위에 발이 오도록 조정
-                target_clearance = 0.005
-                height_adjustment = target_clearance - lowest_foot_z
-                
-                # 트렁크 높이 조정
-                self.data.qpos[2] += height_adjustment
-                
-                # 물리 시뮬레이션 재적용
-                mujoco.mj_forward(self.model, self.data)
-                
-        except Exception as e:
-            print(f"⚠️ 뒷발 높이 자동 조정 실패: {e}")
-
-    def _get_adaptive_noise_scale(self):
-        """훈련 진행도에 따라 노이즈 스케일을 점진적으로 감소"""
-        # 진행도 계산 (0.0 ~ 1.0)
-        progress = min(self.total_timesteps / self.max_training_timesteps, 1.0)
-        
-        # 초기에는 매우 큰 노이즈, 점차 감소
-        # 이전보다 더 큰 초기 노이즈와 더 급격한 감소
-        initial_scale = 0.35  # 초기 노이즈 증가 (이전 0.25 -> 0.35)
-        final_scale = 0.015   # 최종 노이즈 감소 (이전 0.02 -> 0.015)
-        
-        # 다단계 감소 함수 사용
-        if progress < 0.2:
-            # 초기 20%: 매우 큰 노이즈 유지
-            noise_scale = initial_scale
-        elif progress < 0.5:
-            # 20-50%: 천천히 감소
-            t = (progress - 0.2) / 0.3
-            noise_scale = initial_scale * (1 - t * 0.3)  # 30% 감소
-        elif progress < 0.8:
-            # 50-80%: 더 빠르게 감소
-            t = (progress - 0.5) / 0.3
-            mid_scale = initial_scale * 0.7
-            noise_scale = mid_scale * (1 - t * 0.6)  # 60% 추가 감소
-        else:
-            # 80-100%: 최종 미세 조정
-            t = (progress - 0.8) / 0.2
-            low_scale = initial_scale * 0.28
-            noise_scale = low_scale * (1 - t * 0.9) + final_scale * t
-        
-        return noise_scale
-
-    def _get_extended_obs(self):
-        """확장된 관찰 상태 (2족 보행용 추가 정보 포함)"""
-        # 기본 정보 (45차원)
-        base_obs = self._get_base_obs()
-        
-        # 2족 보행 특화 정보 추가
-        # 1. 발 높이 정보
-        foot_heights = np.array([
-            self._get_foot_height('FR'),
-            self._get_foot_height('FL'),
-            self._get_foot_height('RR'),
-            self._get_foot_height('RL')
-        ])
-        
-        # 2. 발 접촉 정보 - 환경별 보상 객체 사용
-        reward_obj = self._get_reward_object()
-        if reward_obj:
-            foot_contacts = np.array(RobotPhysicsUtils.get_foot_contacts(self.model, self.data))
-        else:
-            # 보상 객체가 없으면 직접 계산
-            foot_contacts = np.array(self._get_foot_contacts_direct())
-        
-        # 3. 상체 기울기 (pitch, roll)
-        trunk_quat = self.data.qpos[3:7]
-        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
-        
-        # 4. 목표 자세 정보 (2족 서기 목표)
-        target_height = 0.45  # 2족 목표 높이
-        height_error = abs(self.data.qpos[2] - target_height)
-        
-        # 추가 정보 결합 (11차원)
-        extended_info = np.concatenate([
-            foot_heights,           # 4차원
-            foot_contacts,          # 4차원  
-            [pitch, roll],          # 2차원
-            [height_error]          # 1차원
-        ])
-        
-        # 전체 관찰 상태 = 기본(45) + 확장(11) = 56차원
-        return np.concatenate([base_obs, extended_info])
-
-    def _get_base_obs(self):
-        """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
-        # 부모 클래스의 관찰 방법 사용
-        return super()._get_obs()
-    
-    def _get_obs(self):
-        """관찰 상태 반환 - 호환성 모드에 따라 선택"""
-        if self._use_base_observation:
-            return self._get_base_obs()
-        else:
-            return self._get_extended_obs()
-
-    def _get_foot_height(self, foot_name):
-        """발 높이 계산"""
-        try:
-            foot_site_id = self.model.site(foot_name).id
-            foot_pos = self.data.site_xpos[foot_site_id]
-            return foot_pos[2]  # z 좌표
-        except:
-            return 0.0
-
-    def _quat_to_euler(self, quat):
-        """Quaternion을 Euler angles로 변환"""
-        w, x, y, z = quat
-        
-        # Roll (x-axis rotation)
-        sinr_cosp = 2 * (w * x + y * z)
-        cosr_cosp = 1 - 2 * (x * x + y * y)
-        roll = np.arctan2(sinr_cosp, cosr_cosp)
-        
-        # Pitch (y-axis rotation)
-        sinp = 2 * (w * y - z * x)
-        if abs(sinp) >= 1:
-            pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
-        else:
-            pitch = np.arcsin(sinp)
-        
-        # Yaw (z-axis rotation)
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        yaw = np.arctan2(siny_cosp, cosy_cosp)
-        
-        return np.array([roll, pitch, yaw])
-
-    def _is_initial_pose_unstable(self):
-        """초기 자세가 너무 불안정한지 확인"""
-        # 무게중심이 지지 다각형을 너무 벗어난 경우
-        com_position = RobotPhysicsUtils.get_com_position(self.model, self.data)
-        rear_feet_positions = RobotPhysicsUtils.get_rear_feet_positions(self.model, self.data)
-        support_center = np.mean(rear_feet_positions, axis=0)
-        com_error = np.linalg.norm(com_position[:2] - support_center)
-        
-        return com_error > 0.15  # 15cm 이상 벗어나면 불안정
-
-    def _set_bipedal_ready_pose_conservative(self):
-        """보수적인 2족 준비 자세 (fallback)"""
-        # 기본값에 가까운 안전한 설정
-        self.data.qpos[0:2] = 0.0  # x, y
-        self.data.qpos[2] = 0.62   # z
-        
-        # 안정적인 pitch 각도
-        pitch_angle = -1.5
-        r = Rotation.from_euler('xyz', [0, pitch_angle, 0])
-        quat = r.as_quat()
-        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
-        
-        # 공통 기본 관절 각도 사용
-        self.data.qpos[7:19] = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
-        
-        # 속도는 모두 0
-        self.data.qvel[:] = 0.0
-        self.data.qacc[:] = 0.0
-        self.data.ctrl[:] = 0.0
-        
-        mujoco.mj_forward(self.model, self.data)
-
-    def _set_bipedal_ready_pose(self):
-        """2족 보행 준비 자세 설정 - 통합 랜덤성 적용"""
-        
-        # 훈련 진행도 계산
-        progress = min(getattr(self, 'total_timesteps', 0) / self.max_training_timesteps, 1.0)
-        
-        # ✅ 파라미터명 수정: local_multiplier -> intensity_multiplier
-        config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=2.5)
-        
-        # 위치 랜덤화
-        #RobotPhysicsUtils.apply_random_position(self.data, config)
-        
-        # 높이 랜덤화 (2족용)
-        #RobotPhysicsUtils.apply_random_height(self.data, base_height=0.62, config=config)
-        
-        # 자세 랜덤화 (2족용 pitch)
-        RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=-1.95, config=config)
-        
-        # 관절 랜덤화 (2족용)
-        base_joints = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
-        joint_ranges = self.model.jnt_range[1:]
-        RobotPhysicsUtils.apply_random_joints(self.data, base_joints, joint_ranges, config)
-        
-        # 속도 랜덤화
-        RobotPhysicsUtils.apply_random_velocity(self.data, config)
-        
-        # 초기화
-        self.data.qacc[:] = 0.0
-        self.data.ctrl[:] = 0.0
-        
-        # 물리 시뮬레이션 적용
-        mujoco.mj_forward(self.model, self.data)
-        
-        # [수정] 불안정성 체크 로직 이전에 뒷발 접지를 먼저 수행하여 안정적인 시작 자세 보장
-        self._ensure_rear_feet_contact()
-        
-        # 30% 확률로만 안정성 체크 (전역 강도에 따라 조정)
-        if np.random.random() < 0.5 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY and self._is_initial_pose_unstable():
-            self._set_bipedal_ready_pose_conservative()
-            # 보수적인 자세 설정 후에도 다시 한번 접지 확인
-            self._ensure_rear_feet_contact()
-
-    def get_pose_info(self):
-        """현재 자세 정보 반환 (디버깅용)"""
-        trunk_quat = self.data.qpos[3:7]
-        pitch, roll, yaw = self._quat_to_euler(trunk_quat)
-        
-        return {
-            'height': self.data.qpos[2],
-            'pitch_degrees': np.rad2deg(pitch),
-            'roll_degrees': np.rad2deg(roll),
-            'yaw_degrees': np.rad2deg(yaw),
-            'pose_type': self._classify_pose(pitch)
-        }
-
-    def _classify_pose(self, pitch_rad):
-        """Pitch 각도에 따른 자세 분류"""
-        pitch_deg = np.rad2deg(pitch_rad)
-        
-        if -10 <= pitch_deg <= 10:
-            return "4족 서기 (수평)"
-        elif -100 <= pitch_deg <= -80:
-            return "2족 서기 (수직)"
-        elif -80 <= pitch_deg <= -10:
-            return "중간 자세 (기울어짐)"
-        else:
-            return "비정상 자세"
-
-    def _set_natural_standing_pose(self):
-        """자연스러운 4족 서있기 자세 설정 - 통합 랜덤성 적용"""
-        
-        # 훈련 진행도 계산
-        progress = min(getattr(self, 'total_timesteps', 0) / self.max_training_timesteps, 1.0)
-        
-        # ✅ 파라미터명 수정: local_multiplier -> intensity_multiplier
-        config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=2.0)
-        
-        # 위치 랜덤화
-        RobotPhysicsUtils.apply_random_position(self.data, config)
-        
-        # 높이 랜덤화
-        RobotPhysicsUtils.apply_random_height(self.data, base_height=0.30, config=config)
-        
-        # 자세 랜덤화
-        RobotPhysicsUtils.apply_random_orientation(self.data, base_pitch=0.0, config=config)
-        
-        # 관절 랜덤화
-        base_joints = RobotPhysicsUtils.NATURAL_STANDING_JOINTS.copy()
-        joint_ranges = self.model.jnt_range[1:]
-        RobotPhysicsUtils.apply_random_joints(self.data, base_joints, joint_ranges, config)
-        
-        # 속도 랜덤화
-        RobotPhysicsUtils.apply_random_velocity(self.data, config)
-        
-        # 초기화
-        self.data.qacc[:] = 0.0
-        self.data.ctrl[:] = 0.0
-        
-        # 물리 시뮬레이션 적용
-        mujoco.mj_forward(self.model, self.data)
-        
-        # 50% 확률로 높이 자동 조정 (전역 강도에 따라 조정)
-        if np.random.random() < 0.5 * RobotPhysicsUtils.GLOBAL_RANDOMNESS_INTENSITY:
-            self._auto_adjust_height_for_ground_contact()
-
-    def _auto_adjust_height_for_ground_contact(self):
-        """모든 발이 지면에 접촉하도록 로봇 높이 자동 조정"""
-        try:
-            # 모든 발의 위치 확인
-            foot_names = ["FR", "FL", "RR", "RL"]
-            foot_positions = []
-            
-            for foot_name in foot_names:
-                try:
-                    foot_site_id = self.model.site(foot_name).id
-                    foot_pos = self.data.site_xpos[foot_site_id]
-                    foot_positions.append(foot_pos[2])  # z 좌표만
-                except:
-                    continue
-            
-            if foot_positions:
-                # 가장 낮은 발의 z 좌표
-                lowest_foot_z = min(foot_positions)
-                
-                # 지면(z=0)에서 0.5cm 위에 발이 오도록 조정
-                target_clearance = 0.005  # 0.5cm
-                height_adjustment = target_clearance - lowest_foot_z
-                
-                # 트렁크 높이 조정
-                self.data.qpos[2] += height_adjustment
-                
-                # 물리 시뮬레이션 재적용
-                mujoco.mj_forward(self.model, self.data)
-                
-        except Exception as e:
-            print(f"⚠️ 높이 자동 조정 실패: {e}")
-
-    def reset(self, seed=None, options=None):
-        """환경 리셋 - 자연스러운 4족 서있기 자세에서 시작"""
-        obs, info = super().reset(seed=seed, options=options)
-
-        if self.original_gravity is None:
-            self.original_gravity = self.model.opt.gravity.copy()
-
-        # 자연스러운 4족 서있기 자세로 설정
-        self._set_natural_standing_pose()
-
-        if self.randomize_physics and self.original_gravity is not None:
-            self._apply_domain_randomization()
-
-        self.episode_length = 0
-
-        return self._get_obs(), info
-
-    def _apply_domain_randomization(self):
-        """물리 파라미터 랜덤화 - 통합 버전"""
-        if self.original_gravity is not None:
-            progress = min(getattr(self, 'total_timesteps', 0) / self.max_training_timesteps, 1.0)
-            # ✅ 파라미터명 수정: local_multiplier -> intensity_multiplier
-            config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=1.5)
-            
-            RobotPhysicsUtils.apply_physics_randomization(self.model, self.original_gravity, config)
-
-    def step(self, action):
-        """환경 스텝 실행 - 훈련 진행도 추적 추가"""
-        self.do_simulation(action, self.frame_skip)
-
-        obs = self._get_obs()
-
-        reward, reward_info = self.standing_reward.compute_reward(self.model, self.data, action)
-
-        terminated = self._is_terminated()
-        truncated = self.episode_length >= self.max_episode_length
-
-        self.episode_length += 1
-        
-        # ✅ 훈련 진행도 추적
-        self.total_timesteps += 1
-
-        if hasattr(self, 'total_timesteps'):
-            self.total_timesteps += 1
-        else:
-            self.total_timesteps = 1
-
-        info = {
-            'episode_length': self.episode_length,
-            'standing_reward': reward,
-            'standing_success': self._is_standing_successful(),
-            'noise_scale': self._get_adaptive_noise_scale(),  # 현재 노이즈 스케일 정보
-            **reward_info
-        }
-
-        if terminated or truncated:
-            success = self._is_bipedal_success()
-            # 이동 평균을 사용하여 성공률 업데이트
-            self.episode_success_rate = 0.95 * self.episode_success_rate + 0.05 * success
-            self.advance_curriculum()
-        
-        return obs, reward, terminated, truncated, info
-
-    def _is_terminated(self):
-        """종료 조건"""
-        
-        # 1. 높이 체크
-        if self.data.qpos[2] < self._healthy_z_range[0] or self.data.qpos[2] > self._healthy_z_range[1]:
-            return True
-        
-        # 2. 기울기 체크
-        trunk_quat = self.data.qpos[3:7]
-        pitch, roll, _ = self._quat_to_euler(trunk_quat)
-        
-        if not (self._healthy_pitch_range[0] <= pitch <= self._healthy_pitch_range[1]):
-            return True
-            
-        if not (self._healthy_roll_range[0] <= roll <= self._healthy_roll_range[1]):
-            return True
-        
-        # 3. 속도 체크
-        linear_vel = np.linalg.norm(self.data.qvel[:3])
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        
-        if linear_vel > 2.0 or angular_vel > 5.0:
-            return True
-        
-        return False
-
-    def _is_standing_successful(self):
-        """4족 서있기 성공 판정"""
-        trunk_height = self.data.qpos[2]
-        trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-
-        # 발 접촉 확인
-        foot_contacts = RobotPhysicsUtils.get_foot_contacts(self.model, self.data)
-
-        # 성공 조건
-        height_ok = 0.25 < trunk_height < 0.38       # 적절한 높이
-        upright_ok = up_vector[2] > 0.85             # 충분히 직립
-        all_feet_contact = sum(foot_contacts) >= 3.5 # 거의 모든 발이 접촉
-        
-        # 안정성 조건
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        linear_vel = np.linalg.norm(self.data.qvel[:3])
-        stable = angular_vel < 1.0 and linear_vel < 0.5
-
-        # 지속 시간 조건
-        duration_ok = self.episode_length > 100  # 최소 100 스텝 유지
-
-        return (height_ok and upright_ok and all_feet_contact and 
-                stable and duration_ok)
-
-    def _is_foot_contact(self, foot_name):
-        """발 접촉 상태 확인"""
-        try:
-            foot_geom_id = self.model.geom(foot_name).id
-            for i in range(self.data.ncon):
-                contact_geom1 = self.data.contact[i].geom1
-                contact_geom2 = self.data.contact[i].geom2
-                if contact_geom1 == foot_geom_id or contact_geom2 == foot_geom_id:
-                    contact_force = np.linalg.norm(self.data.contact[i].force)
-                    if contact_force > 0.1:
-                        return True
-            return False
-        except:
-            return False
-
-    def _get_foot_contacts_direct(self):
-        """보상 객체 없이 직접 발 접촉 계산"""
-        return RobotPhysicsUtils.get_foot_contacts(self.model, self.data)
-
-    def _get_reward_object(self):
-        """현재 환경의 보상 객체 반환"""
-        if hasattr(self, 'bipedal_reward'):
-            return self.bipedal_reward
-        elif hasattr(self, 'standing_reward'):
-            return self.standing_reward
-        else:
-            return None
-
-
-class BipedalWalkingEnv(Go1StandingEnv):
-    """2족 보행 전용 환경 - 관찰 공간 호환성 개선"""
-
-    def __init__(self, **kwargs):
-        # 허용되지 않는 파라미터들 제거
-        filtered_kwargs = {}
-        allowed_params = {
-            'randomize_physics', 'render_mode', 'frame_skip', 
-            'observation_space', 'default_camera_config', 'use_base_observation'
-        }
-        
-        for key, value in kwargs.items():
-            if key in allowed_params:
-                filtered_kwargs[key] = value
-        
-        # ✅ 호환성 모드 설정
-        self._use_base_observation = kwargs.get('use_base_observation', False)
-        
-        # 부모 클래스 초기화 (필터링된 kwargs 사용)
+        # 부모 클래스를 Go1MujocoEnv로 직접 지정하여 초기화
         super().__init__(**filtered_kwargs)
         
         # 2족 보행용 보상 함수 사용
@@ -1399,165 +988,308 @@ class BipedalWalkingEnv(Go1StandingEnv):
         self.episode_length = 0
         self.max_episode_length = 1000
 
-        # 2족 보행을 위한 건강 상태 조건
-        self._healthy_z_range = (0.25, 0.60)  # 2족 보행 높이 범위
-        self._healthy_pitch_range = (-np.deg2rad(30), np.deg2rad(30))  # 더 관대한 기울기
-        self._healthy_roll_range = (-np.deg2rad(30), np.deg2rad(30))
-
         # Domain randomization 설정
         self.randomize_physics = kwargs.get('randomize_physics', True)
         self.original_gravity = None
 
+        # 훈련 진행도 추적
+        self.total_timesteps = 0
+        self.max_training_timesteps = 5_000_000
+
+        # 관찰 공간 재설정
+        if self._use_base_observation:
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=self._get_base_obs().shape,
+                dtype=np.float64
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=self._get_extended_obs().shape,
+                dtype=np.float64
+            )
+        # endregion
+        # ------------------------------------------------------------------
+        
+        # 2족 보행을 위한 건강 상태 조건 (BipedalWalkingEnv 고유 설정)
+        self._healthy_z_range = (0.25, 0.70) # 더 넓은 높이 허용
+        self._healthy_pitch_range = (-np.deg2rad(140), -np.deg2rad(30))
+        self._healthy_roll_range = (-np.deg2rad(170), np.deg2rad(170))
+        
+        self._last_x_position = 0.0
+        self._no_progress_steps = 0
+        self.episode_success_rate = 0.0
+
+
+    # ------------------------------------------------------------------
+    # region: Go1StandingEnv로부터 가져온 헬퍼 함수들
+    # ------------------------------------------------------------------
+
+    def _get_obs(self):
+        """관찰 상태 반환 - 호환성 모드에 따라 선택"""
+        if self._use_base_observation:
+            return self._get_base_obs()
+        else:
+            return self._get_extended_obs()
+
+    def _get_base_obs(self):
+        """기본 Go1MujocoEnv와 호환되는 관찰 상태 (45차원)"""
+        return super()._get_obs()
+
+    def _get_extended_obs(self):
+        """확장된 관찰 상태 (2족 보행용 추가 정보 포함)"""
+        base_obs = self._get_base_obs()
+        foot_heights = np.array([
+            self._get_foot_height('FR'), self._get_foot_height('FL'),
+            self._get_foot_height('RR'), self._get_foot_height('RL')
+        ])
+        foot_contacts = np.array(RobotPhysicsUtils.get_foot_contacts(self.model, self.data))
+        trunk_quat = self.data.qpos[3:7]
+        pitch, roll = self._quat_to_euler(trunk_quat)[:2]
+        target_height = 0.62
+        height_error = abs(self.data.qpos[2] - target_height)
+        
+        extended_info = np.concatenate([
+            foot_heights, foot_contacts, [pitch, roll], [height_error]
+        ])
+        return np.concatenate([base_obs, extended_info])
+
+    def _get_foot_height(self, foot_name):
+        """발 높이 계산"""
+        try:
+            return self.data.site_xpos[self.model.site(foot_name).id][2]
+        except:
+            return 0.0
+
+    def _quat_to_euler(self, quat):
+        """Quaternion을 Euler angles로 변환"""
+        w, x, y, z = quat
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
+        sinp = 2 * (w * y - z * x)
+        pitch = np.arcsin(np.clip(sinp, -1, 1))
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+        return np.array([roll, pitch, yaw])
+
+    def _apply_domain_randomization(self):
+        """물리 파라미터 랜덤화"""
+        if self.original_gravity is not None:
+            progress = min(getattr(self, 'total_timesteps', 0) / self.max_training_timesteps, 1.0)
+            config = RobotPhysicsUtils.get_enhanced_randomness_config(progress, intensity_multiplier=1.5)
+            RobotPhysicsUtils.apply_physics_randomization(self.model, self.original_gravity, config)
+
+    def _ensure_rear_feet_contact(self):
+        """뒷발이 지면에 접촉하도록 로봇 높이 자동 조정"""
+        try:
+            foot_positions_z = [self.data.site_xpos[self.model.site(name).id][2] for name in ["RR", "RL"]]
+            if foot_positions_z:
+                lowest_foot_z = min(foot_positions_z)
+                height_adjustment = 0.005 - lowest_foot_z
+                self.data.qpos[2] += height_adjustment
+                mujoco.mj_forward(self.model, self.data)
+        except Exception as e:
+            print(f"⚠️ 뒷발 높이 자동 조정 실패: {e}")
+
+    def _is_initial_pose_unstable(self):
+        """초기 자세가 너무 불안정한지 확인"""
+        com_pos = RobotPhysicsUtils.get_com_position(self.model, self.data)
+        rear_feet_pos = RobotPhysicsUtils.get_rear_feet_positions(self.model, self.data)
+        support_center = np.mean(rear_feet_pos, axis=0)
+        com_error = np.linalg.norm(com_pos[:2] - support_center)
+        return com_error > 0.20 # 허용 오차 약간 증가
+
+    def _set_bipedal_ready_pose_conservative(self):
+        """보수적인 2족 준비 자세 (안전 장치) - 상속 문제 해결을 위해 BipedalWalkingEnv에서 복사"""
+        self.data.qpos[0:2] = 0.0
+        self.data.qpos[2] = 0.62
+        pitch_angle = -1.5
+        r = Rotation.from_euler('xyz', [0, pitch_angle, 0])
+        quat = r.as_quat()
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
+        self.data.qpos[7:19] = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
+    def _set_bipedal_ready_pose(self):
+        """(수정) 2족 보행 준비 자세 설정 - 초기 자세 랜덤성 제거"""
+        # 사용자 요청: 초기 자세의 랜덤성을 제거하여 항상 동일한 자세에서 시작하도록 수정합니다.
+        # 위치 및 자세, 관절 각도, 속도를 고정된 값으로 설정합니다.
+        self.data.qpos[0:2] = 0.0  # x, y 위치 초기화
+        self.data.qpos[2] = 0.62   # z 높이 설정
+        
+        # 고정된 피치 각도(-1.5 rad, 약 -86도)로 설정
+        pitch_angle = -1.5
+        r = Rotation.from_euler('xyz', [0, pitch_angle, 0])
+        quat = r.as_quat()
+        # MuJoCo 쿼터니언 순서 (w, x, y, z)
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
+        
+        # 기본 'BIPEDAL_READY_JOINTS' 관절 각도로 설정
+        self.data.qpos[7:19] = RobotPhysicsUtils.BIPEDAL_READY_JOINTS.copy()
+        
+        # 모든 속도를 0으로 초기화
+        self.data.qvel[:] = 0.0
+        
+        # 가속도 및 제어 입력 초기화
+        self.data.qacc[:] = 0.0
+        self.data.ctrl[:] = 0.0
+        
+        # 시뮬레이션 상태 업데이트
+        mujoco.mj_forward(self.model, self.data)
+        
+        # 뒷발이 지면에 확실히 닿도록 높이 미세 조정
+        #self._ensure_rear_feet_contact()
+
+    def _is_foot_contact(self, foot_name):
+        """발 접촉 상태 확인"""
+        try:
+            foot_geom_id = self.model.geom(foot_name).id
+            for i in range(self.data.ncon):
+                contact = self.data.contact[i]
+                if contact.geom1 == foot_geom_id or contact.geom2 == foot_geom_id:
+                    # 접촉력이 0.1 이상일 때만 유의미한 접촉으로 간주
+                    if np.linalg.norm(mujoco.mj_contactForce(self.model, self.data, i, np.zeros(6))) > 0.1:
+                        return True
+            return False
+        except:
+            return False
+
+    # endregion
+    # ------------------------------------------------------------------
+
+
     def reset(self, seed=None, options=None):
         """환경 리셋 - 2족 보행 준비 자세에서 시작"""
+        # Go1MujocoEnv의 reset_model()이 내부적으로 호출됨
         obs, info = super().reset(seed=seed, options=options)
 
         if self.original_gravity is None:
             self.original_gravity = self.model.opt.gravity.copy()
 
-        # 2족 보행 준비 자세로 설정
         self._set_bipedal_ready_pose()
 
-        if self.randomize_physics and self.original_gravity is not None:
+        if self.randomize_physics:
             self._apply_domain_randomization()
 
         self.episode_length = 0
-
-        self._last_x_position = 0.0
+        self._last_x_position = self.data.qpos[0]
         self._no_progress_steps = 0
+        
+        # info 딕셔너리에 리셋 정보 추가
+        info.update({
+            'initial_height': self.data.qpos[2],
+            'initial_pitch_deg': np.rad2deg(self._quat_to_euler(self.data.qpos[3:7])[1]),
+        })
+        
         return self._get_obs(), info
 
     def step(self, action):
-        """환경 스텝 실행"""
+        """환경 스텝 실행 - 훈련 단계에 따라 적응적으로 노이즈 적용"""
+        
+        self.data.xfrc_applied[:] = 0
+        
+        # =========================================================================
+        # ✅ [사용자 최종 요청 완벽 반영]
+        # 훈련 초반에는 관절을 강제로 순간이동시키고,
+        # 진행되면서 점차 물리적인 속도/외력 노이즈로 전환하는 '노이즈 커리큘럼' 적용
+        # =========================================================================
+        if self.randomize_physics:
+            RobotPhysicsUtils.apply_adaptive_step_noise(
+                self.data,
+                self.model,
+                getattr(self, 'total_timesteps', 0),
+                self.max_training_timesteps
+            )
+
         self.do_simulation(action, self.frame_skip)
-
+        
         obs = self._get_obs()
+        reward, reward_info = self.bipedal_reward.compute_reward(
+            self.model, self.data, action, self.dt, getattr(self, 'total_timesteps', 0)
+        )
 
-        # ✅ compute_reward 호출 시 self.total_timesteps 전달
-        # 💡 self.total_timesteps는 visual_train.py의 StandingTrainingCallback에서 관리하는 self.num_timesteps를 사용하는 것이 더 정확할 수 있으나,
-        #    우선 환경 내에서 독립적으로 작동하도록 self.total_timesteps를 사용합니다.
-        reward, reward_info = self.bipedal_reward.compute_reward(self.model, self.data, action, self.dt, getattr(self, 'total_timesteps', 0))
-
-        # _is_terminated의 반환값을 두 변수로 받음
         terminated, reason = self._is_terminated()
         truncated = self.episode_length >= self.max_episode_length
-
         self.episode_length += 1
-
+        
         if hasattr(self, 'total_timesteps'):
             self.total_timesteps += 1
-        else:
-            self.total_timesteps = 1
 
-        # 'terminated'가 True일 때만 reason을, 아니면 None을 할당하는 부분!
+        if terminated or truncated:
+            success = self._is_bipedal_success()
+            self.episode_success_rate = 0.95 * self.episode_success_rate + 0.05 * success
+            
+            if hasattr(self, 'advance_curriculum'):
+                self.advance_curriculum(self.episode_success_rate)
+                
         info = {
             'episode_length': self.episode_length,
             'bipedal_reward': reward,
             'bipedal_success': self._is_bipedal_success(),
             'termination_reason': reason if terminated else None,
+            'current_success_rate': self.episode_success_rate,
             **reward_info
         }
 
         return obs, reward, terminated, truncated, info
 
-        
-    # BipedalWalkingEnv 클래스 내부
     def _is_terminated(self):
-        """2족 보행용 종료 조건 (높이 체크 제거, 감점으로 대체)"""
-        
-        # ✅ [제거] 상체 높이 체크 로직을 제거하여, 낮은 자세는 페널티로만 처리되도록 함
-        if self.data.qpos[2] < 0.25:
-             return True, "height_too_low"
-        
-        # 2. 기울기 체크 (유지)
-        trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        up_vector = trunk_rotation_matrix[:, 2]
-        # Roll 각도가 너무 클 경우 (몸이 옆으로 심하게 기울어짐)
-        if abs(up_vector[1]) > np.sin(np.deg2rad(50)): # 50도 이상 기울어짐
-            return True, "roll_out_of_range"
-        
-        # ✅ [수정] Pitch 각도 계산 수식을 원래의 올바른 방식으로 되돌립니다.
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0])
-        
-        # Pitch 각도가 범위를 벗어난 경우 (몸이 앞이나 뒤로 심하게 넘어감)
-        # 2족 보행 목표 pitch는 약 -1.5rad (-86도) 근처임
-        if not (-2.2 < pitch_angle < -0.8): # 약 -126도 ~ -45도 범위를 벗어나면 종료
-            return True, "pitch_out_of_range"
-        
-        # 3. 속도 체크 (유지)
+        """2족 보행용 종료 조건"""
+        height = self.data.qpos[2]
+        if height < self._healthy_z_range[0] or height > self._healthy_z_range[1]:
+             return True, f"height_out_of_range ({height:.2f})"
+
+        pitch = self._quat_to_euler(self.data.qpos[3:7])[1]
+        if not (self._healthy_pitch_range[0] < pitch < self._healthy_pitch_range[1]):
+            return True, f"pitch_out_of_range ({np.rad2deg(pitch):.1f} deg)"
+
+        # [수정] roll 값도 라디안 단위로 가져와서 라디안 범위와 비교
+        roll = self._quat_to_euler(self.data.qpos[3:7])[0]
+        if not (self._healthy_roll_range[0] < roll < self._healthy_roll_range[1]):
+            pass
+            # 출력할 때만 각도(degree)로 변환
+            #print(f"roll: {np.rad2deg(roll):.1f} deg"  , np.rad2deg(self._healthy_roll_range[0]) , np.rad2deg(self._healthy_roll_range[1]), self._healthy_roll_range[0] < roll  , self._healthy_roll_range[1] > roll)
+            #return True, f"roll_out_of_range ({np.rad2deg(roll):.1f} deg)"
+
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        if linear_vel > 10.0 or angular_vel > 10.0:
+        if linear_vel > 10.0 or angular_vel > 15.0:
             return True, "excessive_velocity"
-        
-        # 4. 진전 없음 체크 (유지)
-        if self.episode_length % 100 == 0:
+            
+        # 300스텝(약 3초) 동안 5cm도 전진 못하면 종료
+        if self.episode_length > 0 and self.episode_length % 300 == 0:
             if abs(self.data.qpos[0] - self._last_x_position) < 0.05:
                 self._no_progress_steps += 1
             else:
                 self._no_progress_steps = 0
             self._last_x_position = self.data.qpos[0]
 
-        if self._no_progress_steps >= 3:
+        if self._no_progress_steps >= 1: # 300 스텝 동안 멈춰있으면 종료
             return True, "no_progress"
             
         return False, "not_terminated"
 
-    def _is_unstable(self):
-        """불안정 상태 판정"""
-        # 각속도가 너무 클 때
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        if angular_vel > 4.0:
-            return True
-        
-        # 높이가 너무 낮을 때
-        if self.data.qpos[2] < 0.2:
-            return True
-        
-        return False
-
     def _is_bipedal_success(self):
-        """2족 보행 성공 판정 - 실제 2족 자세 기준으로 수정"""
+        """2족 보행 성공 판정"""
+        height_ok = 0.58 < self.data.qpos[2] < 0.68
         
-        # 1. 높이 확인
-        trunk_height = self.data.qpos[2]
-        height_ok = 0.58 < trunk_height < 0.68  # 2족 보행 높이
+        pitch = self._quat_to_euler(self.data.qpos[3:7])[1]
+        pitch_ok = -1.6 < pitch < -1.4
         
-        # 2. Pitch 각도 확인
-        trunk_quat = self.data.qpos[3:7]
-        trunk_rotation_matrix = RobotPhysicsUtils.quat_to_rotmat(trunk_quat)
-        pitch_angle = np.arcsin(-trunk_rotation_matrix[2, 0]) # ✅ 올바른 수식으로 수정
-        pitch_ok = -1.6 < pitch_angle < -1.4  # 목표 주변 ±0.1 라디안
+        front_feet_up = all(self._get_foot_height(name) > 0.15 for name in ['FR', 'FL'])
         
-        # 3. 앞발이 충분히 들려있는지
-        front_feet_heights = [
-            self._get_foot_height('FR'),
-            self._get_foot_height('FL')
-        ]
-        front_feet_up = all(h > 0.15 for h in front_feet_heights)  # 15cm 이상
-        
-        # 4. 뒷발만 접촉
-        rear_contacts = [
-            self._is_foot_contact('RR'),
-            self._is_foot_contact('RL')
-        ]
-        front_contacts = [
-            self._is_foot_contact('FR'),
-            self._is_foot_contact('FL')
-        ]
+        rear_contacts = [self._is_foot_contact('RR'), self._is_foot_contact('RL')]
+        front_contacts = [self._is_foot_contact('FR'), self._is_foot_contact('FL')]
         rear_feet_only = all(rear_contacts) and not any(front_contacts)
         
-        # 5. 안정성
-        angular_vel = np.linalg.norm(self.data.qvel[3:6])
-        linear_vel = np.linalg.norm(self.data.qvel[:3])
-        stable = angular_vel < 1.5 and linear_vel < 0.5
+        stable = np.linalg.norm(self.data.qvel[3:6]) < 1.5
+        duration_ok = self.episode_length > 300
         
-        # 6. 지속 시간
-        duration_ok = self.episode_length > 300  # 3초 이상
-        
-        return (height_ok and pitch_ok and front_feet_up and 
-                rear_feet_only and stable and duration_ok)
+        return all([height_ok, pitch_ok, front_feet_up, rear_feet_only, stable, duration_ok])
 
 
 class BipedalCurriculumEnv(BipedalWalkingEnv):
@@ -1622,57 +1354,6 @@ class BipedalCurriculumEnv(BipedalWalkingEnv):
         return False
 
 
-class GradualStandingEnv(Go1StandingEnv):
-    """점진적 커리큘럼 4족 서있기 환경"""
-
-    def __init__(self, curriculum_stage=0, **kwargs):
-        # 동일한 필터링 적용
-        filtered_kwargs = {}
-        allowed_params = {
-            'randomize_physics', 'render_mode', 'frame_skip', 
-            'observation_space', 'default_camera_config', 'use_base_observation'
-        }
-        
-        for key, value in kwargs.items():
-            if key in allowed_params:
-                filtered_kwargs[key] = value
-            elif key != 'curriculum_stage':
-                pass
-        
-        super().__init__(**filtered_kwargs)
-        self.curriculum_stage = curriculum_stage
-        self._setup_curriculum()
-
-    def _setup_curriculum(self):
-        """커리큘럼 단계별 설정"""
-        if self.curriculum_stage == 0:
-            # Stage 0: 기본 균형 유지에 집중
-            self.max_episode_length = 500
-            self._healthy_z_range = (0.20, 0.42)
-            
-        elif self.curriculum_stage == 1:
-            # Stage 1: 더 정밀한 균형
-            self.max_episode_length = 750
-            self._healthy_z_range = (0.22, 0.40)
-            
-        elif self.curriculum_stage == 2:
-            # Stage 2: 장시간 유지
-            self.max_episode_length = 1000
-            self._healthy_z_range = (0.24, 0.38)
-            
-        else:
-            # Stage 3+: 완벽한 서있기
-            self.max_episode_length = 1500
-            self._healthy_z_range = (0.25, 0.37)
-
-    def advance_curriculum(self, success_rate):
-        """성공률에 따라 커리큘럼 진행"""
-        if success_rate > 0.80 and self.curriculum_stage < 5:
-            self.curriculum_stage += 1
-            self._setup_curriculum()
-            print(f"🎓 커리큘럼 진행: Stage {self.curriculum_stage}")
-            return True
-        return False
 
 
 # ✅ 환경 생성 헬퍼 함수

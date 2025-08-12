@@ -706,22 +706,27 @@ class VideoRecordingCallback(BaseCallback):
         total_terminations_in_video = 0
         
         try:
-            obs = self.record_env.reset()
+            # 1. reset()이 (obs, info) 튜플을 반환하므로 obs만 사용하도록 수정
+            obs, _ = self.record_env.reset()
             frames = []
             episode_reward = 0
             start_time = time.time()
             
             while time.time() - start_time < self.show_duration_seconds:
                 action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, done, info = self.record_env.step(action)
+                
+                # 2. step()이 (obs, reward, terminated, truncated, info) 5개 값을 반환하도록 수정
+                obs, reward, terminated, truncated, info = self.record_env.step(action)
+                
                 episode_reward += reward[0] if isinstance(reward, np.ndarray) else reward
                 
-                frame = self.record_env.render(mode='rgb_array')
+                frame = self.record_env.render()
                 if isinstance(frame, list):
                     frame = frame[0]
                 frames.append(frame)
                 
-                is_done = done[0] if isinstance(done, np.ndarray) else done
+                # 3. 'done' 변수는 'terminated'와 'truncated'를 OR 연산하여 사용
+                is_done = terminated or truncated
                 if is_done:
                     current_info = info[0] if isinstance(info, list) else info
                     reason = current_info.get('termination_reason')
@@ -732,7 +737,8 @@ class VideoRecordingCallback(BaseCallback):
                         termination_counts[base_reason] += 1
                         total_terminations_in_video += 1
                     
-                    obs = self.record_env.reset()
+                    # 4. reset()의 반환값을 obs, _로 받도록 수정
+                    obs, _ = self.record_env.reset()
             
             if frames:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
