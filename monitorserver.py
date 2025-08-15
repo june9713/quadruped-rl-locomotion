@@ -10,7 +10,7 @@ import uvicorn
 
 # --- 설정 ---
 # 비디오 파일이 있는 폴더 이름
-VIDEO_DIR_NAME = "eval_videos_standing"
+VIDEO_DIR_NAME = "training_videos"
 # 템플릿 파일이 있는 폴더 이름
 TEMPLATE_DIR_NAME = "templates"
 

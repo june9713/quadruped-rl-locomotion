@@ -33,7 +33,7 @@ LOG_DIR = "logs"
 def train(args):
     vec_env = make_vec_env(
         Go1MujocoEnv,
-        env_kwargs={"ctrl_type": args.ctrl_type},
+        env_kwargs={"ctrl_type": args.ctrl_type, "biped": args.biped},
         n_envs=args.num_parallel_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
@@ -42,6 +42,7 @@ def train(args):
     # 비디오 녹화용 단일 환경 생성
     record_env = Go1MujocoEnv(
         ctrl_type=args.ctrl_type,
+        biped=args.biped,
         render_mode="rgb_array",
         camera_name="tracking",
         width=1024,
@@ -74,8 +75,8 @@ def train(args):
     # 비디오 녹화 콜백 설정 (100,000 타임스텝마다 15초간 녹화)
     video_callback = VideoRecordingCallback(
         record_env=record_env,
-        record_interval_timesteps=500_000,
-        show_duration_seconds=10
+        record_interval_timesteps=args.video_interval,
+        show_duration_seconds=args.video_duration
     )
     
     # 여러 콜백을 함께 사용하기 위해 CallbackList로 묶음
@@ -108,6 +109,7 @@ def test(args):
         # Render the episodes live
         env = Go1MujocoEnv(
             ctrl_type=args.ctrl_type,
+            biped=args.biped,
             render_mode="human",
         )
         inter_frame_sleep = 0.016
@@ -115,6 +117,7 @@ def test(args):
         # Record the episodes
         env = Go1MujocoEnv(
             ctrl_type=args.ctrl_type,
+            biped=args.biped,
             render_mode="rgb_array",
             camera_name="tracking",
             width=1920,
@@ -208,6 +211,28 @@ if __name__ == "__main__":
         default="position",
         help="Whether the model should control the robot using torque or position control.",
     )
+    parser.add_argument(
+        "--biped",
+        action="store_true",
+        help="If set, the robot will be trained for bipedal walking.",
+    )
+
+    #video_duration
+    parser.add_argument(
+        "--video_duration",
+        type=int,
+        default=10,
+        help="Duration of the video to record",
+    )
+
+    parser.add_argument(
+        "--video_interval",
+        type=int,
+        default=300_000,
+        help="Number of timesteps interval to record the video",
+    )
+
+
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 

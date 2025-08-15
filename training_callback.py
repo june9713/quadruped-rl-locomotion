@@ -699,23 +699,26 @@ class VideoRecordingCallback(BaseCallback):
         return True
     
     def _record_video(self):
-        """개선된 비디오 녹화 및 종료 원인 통계 (그룹화 적용)"""
+        """원하는 길이의 비디오를 정확히 녹화하도록 수정한 함수"""
         print(f"\n🎥 비디오 녹화 중... (Timestep: {self.num_timesteps:,})")
         
         termination_counts = defaultdict(int)
         total_terminations_in_video = 0
         
         try:
-            # 1. reset()이 (obs, info) 튜플을 반환하므로 obs만 사용하도록 수정
             obs, _ = self.record_env.reset()
             frames = []
             episode_reward = 0
-            start_time = time.time()
+
+            # 목표 영상 길이와 FPS 설정
+            target_video_seconds = self.show_duration_seconds
+            fps = 30
+            num_frames_to_record = target_video_seconds * fps
             
-            while time.time() - start_time < self.show_duration_seconds:
-                action, _ = self.model.predict(obs, deterministic=True)
+            # 시간 기반 루프를 프레임 수 기반 루프로 변경
+            while len(frames) < num_frames_to_record:
                 
-                # 2. step()이 (obs, reward, terminated, truncated, info) 5개 값을 반환하도록 수정
+                action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, info = self.record_env.step(action)
                 
                 episode_reward += reward[0] if isinstance(reward, np.ndarray) else reward
@@ -725,28 +728,30 @@ class VideoRecordingCallback(BaseCallback):
                     frame = frame[0]
                 frames.append(frame)
                 
-                # 3. 'done' 변수는 'terminated'와 'truncated'를 OR 연산하여 사용
                 is_done = terminated or truncated
                 if is_done:
                     current_info = info[0] if isinstance(info, list) else info
                     reason = current_info.get('termination_reason')
                     
                     if reason and reason != 'not_terminated':
-                        # ⚠️ [수정] 종료 이유를 괄호 '(' 기준으로 분리하여 기본 원인만 추출
                         base_reason = reason.split(' (')[0]
                         termination_counts[base_reason] += 1
                         total_terminations_in_video += 1
+
+                        # ✨ 추가된 부분: 상세한 종료 원인과 값을 직접 출력
+                        details = current_info.get('termination_details', '세부 정보 없음.')
+                        print(f"      - 종료 발생: {base_reason}")
+                        print(f"        └> 상세 정보: {details}")
                     
-                    # 4. reset()의 반환값을 obs, _로 받도록 수정
                     obs, _ = self.record_env.reset()
             
             if frames:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{self.video_folder}/training_t{self.num_timesteps}_r{episode_reward:.0f}_{timestamp}.mp4"
-                imageio.mimsave(filename, frames, fps=30)
+                # 파일명에서 보상 값을 소수점 없이 정수로 표시하도록 수정
+                filename = f"{self.video_folder}/training_t{self.num_timesteps}_r{int(episode_reward)}_{timestamp}.mp4"
+                imageio.mimsave(filename, frames, fps=fps) # 설정한 fps 값 사용
                 print(f"✅ 비디오 저장: {filename} (보상: {episode_reward:.1f})")
 
-            # 그룹화된 데이터로 통계 출력
             if total_terminations_in_video > 0:
                 print("-----------------------------------------")
                 print("| Termination Reasons (During Video)    |")
@@ -757,7 +762,6 @@ class VideoRecordingCallback(BaseCallback):
 
                 for reason, count in sorted_reasons:
                     percentage = (count / total_terminations_in_video) * 100
-                    # 출력 포맷을 base_reason에 맞게 조정
                     print(f"| {reason:<25} | {count:<5} ({percentage:>5.1f}%) |")
                 print("-----------------------------------------")
 
