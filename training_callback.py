@@ -17,6 +17,56 @@ import subprocess
 import sys
 import json
 from matplotlib.gridspec import GridSpec
+import queue # <--- 이 라인을 추가해주세요.
+
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    학습 진행률에 따라 환경의 'rand_power'를 조절하는 커리큘럼 콜백입니다.
+
+    이 콜백은 학습 시작 시 사용자가 지정한 'rand_power' 값에서 시작하여,
+    전체 학습 timesteps의 70% 지점에 도달할 때까지 선형적으로 감소시켜 0으로 만듭니다.
+    70% 이후부터는 'rand_power'를 0으로 유지하여 안정적인 정책을 미세 조정합니다.
+    """
+    def __init__(self, total_timesteps: int, initial_rand_power: float, verbose: int = 0):
+        """
+        CurriculumCallback 인스턴스를 초기화합니다.
+
+        :param total_timesteps: 모델 학습에 사용될 총 타임스텝 수.
+        :param initial_rand_power: 학습 시작 시 적용할 초기 랜덤화 강도.
+        :param verbose: 상세 정보 출력 레벨.
+        """
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.initial_rand_power = initial_rand_power
+        # 커리큘럼이 종료되는 시점 (전체 학습의 70%)
+        self.curriculum_end_step = int(total_timesteps * 0.7)
+        self._last_logged_power = -1.0
+
+    def _on_step(self) -> bool:
+        """
+        학습의 매 스텝마다 호출되어 rand_power를 동적으로 조절합니다.
+        """
+        current_step = self.num_timesteps
+
+        if current_step < self.curriculum_end_step:
+            # 70% 지점에 도달할 때까지 rand_power를 선형적으로 감소시킵니다.
+            # 진행률 (0.0 ~ 1.0) 계산
+            progress = current_step / self.curriculum_end_step
+            new_rand_power = self.initial_rand_power * (1.0 - progress)
+        else:
+            # 70% 지점을 넘어서면 rand_power를 0으로 고정합니다.
+            new_rand_power = 0.0
+
+        # 모든 병렬 환경에 새로운 rand_power 값을 설정합니다.
+        # Go1MujocoEnv 클래스 내부에서는 '_rand_power'라는 이름의 속성을 사용합니다.
+        self.training_env.set_attr("_rand_power", new_rand_power)
+
+        # rand_power 값의 변화를 TensorBoard에 로깅합니다.
+        self.logger.record("curriculum/rand_power", new_rand_power)
+        
+        return True
 
 
 def check_and_install_moviepy():
@@ -42,7 +92,7 @@ class VisualTrainingCallback(BaseCallback):
     def __init__(
         self,
         eval_env: gym.Env,
-        eval_interval_minutes: int = 10,
+        eval_freq: int = 300_000,
         n_eval_episodes: int = 3,
         show_duration_seconds: int = 30,
         save_videos: bool = True,
@@ -50,26 +100,15 @@ class VisualTrainingCallback(BaseCallback):
     ):
         super().__init__(verbose)
         self.eval_env = eval_env
-        self.eval_interval_seconds = eval_interval_minutes * 60
+        self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
         self.show_duration_seconds = show_duration_seconds
         self.save_videos = save_videos
         self.step_zero = True
         
-        self.last_eval_time = time.time()
+        self.last_eval_timestep = 0
         self.eval_count = 0
         self.performance_history = deque(maxlen=50)
-        
-        # 실시간 플롯을 위한 설정
-        plt.ion()
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('실시간 학습 진행 상황', fontsize=16)
-        
-        # 서브플롯 설정
-        self.reward_ax = self.axes[0, 0]
-        self.episode_length_ax = self.axes[0, 1] 
-        self.success_rate_ax = self.axes[1, 0]
-        self.learning_curve_ax = self.axes[1, 1]
         
         # 데이터 저장용
         self.rewards_history = []
@@ -167,52 +206,8 @@ class VisualTrainingCallback(BaseCallback):
         self._update_plots()
    
     def _update_plots(self):
-        """실시간 플롯 업데이트"""
+        pass
         
-        # 1. 보상 추이
-        self.reward_ax.clear()
-        if self.rewards_history:
-            self.reward_ax.plot(self.timesteps_history, self.rewards_history, 'b-o', linewidth=2)
-            self.reward_ax.set_title('평균 보상 추이')
-            self.reward_ax.set_xlabel('Timesteps')
-            self.reward_ax.set_ylabel('평균 보상')
-            self.reward_ax.grid(True, alpha=0.3)
-        
-        # 2. 에피소드 길이 추이
-        self.episode_length_ax.clear()
-        if self.lengths_history:
-            self.episode_length_ax.plot(self.timesteps_history, self.lengths_history, 'g-o', linewidth=2)
-            self.episode_length_ax.set_title('평균 에피소드 길이')
-            self.episode_length_ax.set_xlabel('Timesteps')
-            self.episode_length_ax.set_ylabel('평균 길이')
-            self.episode_length_ax.grid(True, alpha=0.3)
-        
-        # 3. 성공률 추이
-        self.success_rate_ax.clear()
-        if self.success_rates:
-            self.success_rate_ax.plot(self.timesteps_history, 
-                                      [r*100 for r in self.success_rates], 'r-o', linewidth=2)
-            self.success_rate_ax.set_title('성공률 추이')
-            self.success_rate_ax.set_xlabel('Timesteps')
-            self.success_rate_ax.set_ylabel('성공률 (%)')
-            self.success_rate_ax.grid(True, alpha=0.3)
-            self.success_rate_ax.set_ylim(0, 100)
-        
-        # 4. 최근 성능 (박스플롯 또는 히스토그램)
-        self.learning_curve_ax.clear()
-        if len(self.rewards_history) > 1:
-            recent_rewards = self.rewards_history[-10:]
-            self.learning_curve_ax.hist(recent_rewards, bins=max(3, len(recent_rewards)//2), 
-                                        alpha=0.7, color='purple')
-            self.learning_curve_ax.set_title('최근 보상 분포')
-            self.learning_curve_ax.set_xlabel('보상')
-            self.learning_curve_ax.set_ylabel('빈도')
-            self.learning_curve_ax.axvline(np.mean(recent_rewards), color='red', 
-                                           linestyle='--', label=f'평균: {np.mean(recent_rewards):.2f}')
-            self.learning_curve_ax.legend()
-        
-        plt.tight_layout()
-        plt.pause(0.1)
    
     def save_progress_report(self, save_path: str):
         """진행 상황 보고서 저장"""
@@ -272,32 +267,33 @@ class VisualTrainingCallback(BaseCallback):
         print(f"📊 진행 상황 보고서 저장: {save_path}")
 
 
+# 파일명: training_callback.py
+
 class EnhancedVisualCallback(VisualTrainingCallback):
-    """개선된 시각화 콜백 - 더 많은 분석 기능"""
+    """
+    개선된 시각화 콜백 - 실시간 그래프를 이미지 파일로 저장합니다.
+    """
     
-    def __init__(self, *args, use_curriculum=False, **kwargs):
+    def __init__(self, *args, use_curriculum=False, best_model_save_path: str = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.use_curriculum = use_curriculum
         
+        # 최고 모델 저장을 위한 설정
+        self.best_model_save_path = best_model_save_path
+        self.best_mean_reward = -np.inf
+        if self.best_model_save_path is not None:
+            os.makedirs(self.best_model_save_path, exist_ok=True)
+
         # 추가 추적 데이터
         self.reward_components_history = []
         self.curriculum_stages = []
         self.stability_metrics = []
         self.failure_reasons = []
+        self.explained_variance_history = []
+        self.explained_variance_timesteps = []
         
-        # 개선된 플롯 설정
-        plt.ioff()
-        self.fig = plt.figure(figsize=(16, 12))
-        gs = GridSpec(3, 3, figure=self.fig)
-        
-        self.reward_ax = self.fig.add_subplot(gs[0, :2])
-        self.components_ax = self.fig.add_subplot(gs[1, :2])
-        self.success_ax = self.fig.add_subplot(gs[0, 2])
-        self.stability_ax = self.fig.add_subplot(gs[1, 2])
-        self.heatmap_ax = self.fig.add_subplot(gs[2, :2])
-        self.failure_ax = self.fig.add_subplot(gs[2, 2])
-        
-        plt.ion()
+        # --- 스레딩 관련 코드 제거 ---
+        print("\n📈 실시간 학습 그래프는 현재 디렉토리에 'realtime_progress.png' 파일로 주기적으로 저장됩니다.")
    
     def _evaluate_and_visualize(self):
         """개선된 평가 및 시각화"""
@@ -369,11 +365,9 @@ class EnhancedVisualCallback(VisualTrainingCallback):
                     break
                     
                 if terminated or truncated:
-                    # 성공/실패 분석
-                    if info.get('standing_success', False):
+                    if info.get('bipedal_success', False):
                         success_count += 1
                     else:
-                        # 실패 원인 분석
                         failure_reason = self._analyze_failure(info, obs)
                         episode_failures.append(failure_reason)
                     break
@@ -382,14 +376,12 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             episode_rewards.append(episode_reward)
             episode_lengths.append(episode_length)
             
-            # 평균 컴포넌트 값
             avg_components = {}
             for key, values in reward_components.items():
                 if values:
                     avg_components[key] = np.mean(values)
             episode_components.append(avg_components)
             
-            # 평균 안정성
             if stability_metrics:
                 avg_stability = {
                     key: np.mean([m[key] for m in stability_metrics])
@@ -401,16 +393,15 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             print(f"  ⏱️ 길이: {episode_length}")
             print(f"  🎯 주요 컴포넌트: {', '.join([f'{k}:{v:.2f}' for k,v in avg_components.items()][:3])}")
             
-            # 비디오 저장
             if self.save_videos and frames:
                 self._save_video(frames, episode, episode_reward)
         
-        # 전체 평가 결과 저장
+        # 전체 평가 결과 저장 및 최고 모델 업데이트
         self._update_history(episode_rewards, episode_lengths, 
                             episode_components, episode_stability, 
                             episode_failures, success_count)
         
-        # 플롯 업데이트
+        # 플롯 이미지 파일로 저장
         self._update_enhanced_plots()
         
         print(f"\n{'='*70}")
@@ -447,13 +438,21 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             pass
    
     def _update_history(self, rewards, lengths, components, stability, failures, successes):
-        """히스토리 업데이트"""
-        self.rewards_history.append(np.mean(rewards))
+        """히스토리 업데이트 및 최고 성능 모델 저장"""
+        mean_reward = np.mean(rewards)
+        self.rewards_history.append(mean_reward)
         self.lengths_history.append(np.mean(lengths))
         self.success_rates.append(successes / self.n_eval_episodes)
         self.timesteps_history.append(self.num_timesteps)
         
-        # 평균 컴포넌트
+        if self.best_model_save_path is not None:
+            if mean_reward > self.best_mean_reward:
+                self.best_mean_reward = mean_reward
+                print(f"\n🚀 New best mean reward: {self.best_mean_reward:.2f} (at timestep {self.num_timesteps})")
+                save_path = os.path.join(self.best_model_save_path, "best_model.zip")
+                self.model.save(save_path)
+                print(f"💾 Best model saved to {save_path}")
+
         avg_components = {}
         if components:
             keys = components[0].keys()
@@ -462,7 +461,6 @@ class EnhancedVisualCallback(VisualTrainingCallback):
                 avg_components[key] = np.mean(values)
         self.reward_components_history.append(avg_components)
         
-        # 안정성 메트릭
         if stability:
             avg_stability = {}
             keys = stability[0].keys()
@@ -471,121 +469,53 @@ class EnhancedVisualCallback(VisualTrainingCallback):
                 avg_stability[key] = np.mean(values)
             self.stability_metrics.append(avg_stability)
         
-        # 실패 분석
         failure_counts = {}
         for f in failures:
             failure_counts[f] = failure_counts.get(f, 0) + 1
         self.failure_reasons.append(failure_counts)
         
-        # 커리큘럼 단계
         if self.use_curriculum and hasattr(self.eval_env, 'standing_reward'):
             self.curriculum_stages.append(self.eval_env.standing_reward.curriculum_stage)
    
     def _update_enhanced_plots(self):
-        """개선된 플롯 업데이트"""
-        plt.figure(self.fig.number)
-        
-        # 1. 전체 보상 추이
-        self.reward_ax.clear()
-        self.reward_ax.plot(self.timesteps_history, self.rewards_history, 'b-', linewidth=2)
-        if len(self.rewards_history) > 10:
-            # 이동 평균
-            window = min(10, len(self.rewards_history))
-            ma = np.convolve(self.rewards_history, np.ones(window)/window, mode='valid')
-            ma_x = self.timesteps_history[window-1:]
-            self.reward_ax.plot(ma_x, ma, 'r--', linewidth=2, label='이동평균')
-        self.reward_ax.set_title('학습 진행: 평균 보상', fontsize=12)
-        self.reward_ax.set_xlabel('Timesteps')
-        self.reward_ax.set_ylabel('평균 보상')
-        self.reward_ax.grid(True, alpha=0.3)
-        self.reward_ax.legend()
-        
-        # 2. 보상 컴포넌트 분석
-        self.components_ax.clear()
-        if self.reward_components_history:
-            components_df = pd.DataFrame(self.reward_components_history)
-            for col in components_df.columns[:5]:  # 상위 5개만
-                self.components_ax.plot(self.timesteps_history, 
-                                      components_df[col], 
-                                      label=col, linewidth=1.5)
-            self.components_ax.set_title('보상 컴포넌트 추이', fontsize=12)
-            self.components_ax.set_xlabel('Timesteps')
-            self.components_ax.set_ylabel('컴포넌트 값')
-            self.components_ax.legend(loc='best', fontsize=8)
-            self.components_ax.grid(True, alpha=0.3)
-        
-        # 3. 성공률
-        self.success_ax.clear()
-        self.success_ax.plot(self.timesteps_history, 
-                           [r*100 for r in self.success_rates], 
-                           'g-o', linewidth=2, markersize=6)
-        if self.use_curriculum and self.curriculum_stages:
-            # 커리큘럼 단계 표시
-            ax2 = self.success_ax.twinx()
-            ax2.plot(self.timesteps_history, self.curriculum_stages, 
-                    'orange', linestyle='--', linewidth=1)
-            ax2.set_ylabel('커리큘럼 단계', color='orange')
-            ax2.tick_params(axis='y', labelcolor='orange')
-        self.success_ax.set_title('성공률 추이', fontsize=12)
-        self.success_ax.set_xlabel('Timesteps')
-        self.success_ax.set_ylabel('성공률 (%)')
-        self.success_ax.set_ylim(0, 105)
-        self.success_ax.grid(True, alpha=0.3)
-        
-        # 4. 안정성 메트릭
-        self.stability_ax.clear()
-        if self.stability_metrics:
-            stability_df = pd.DataFrame(self.stability_metrics)
-            x = self.timesteps_history[:len(stability_df)]
-            for col in stability_df.columns:
-                self.stability_ax.plot(x, stability_df[col], 
-                                     label=col.replace('_', ' '), linewidth=1.5)
-            self.stability_ax.set_title('안정성 메트릭', fontsize=12)
-            self.stability_ax.set_xlabel('Timesteps')
-            self.stability_ax.set_ylabel('안정성 점수')
-            self.stability_ax.legend(loc='best', fontsize=8)
-            self.stability_ax.grid(True, alpha=0.3)
-            self.stability_ax.set_ylim(0, 1.1)
-        
-        # 5. 보상 컴포넌트 히트맵
-        self.heatmap_ax.clear()
-        if len(self.reward_components_history) > 5:
-            # 최근 데이터로 히트맵
-            recent_components = pd.DataFrame(self.reward_components_history[-20:])
-            if not recent_components.empty:
-                data = recent_components.T.values
-                im = self.heatmap_ax.imshow(data, aspect='auto', cmap='coolwarm')
-                self.heatmap_ax.set_yticks(range(len(recent_components.columns)))
-                self.heatmap_ax.set_yticklabels(recent_components.columns, fontsize=8)
-                self.heatmap_ax.set_xlabel('최근 평가 (과거 → 현재)')
-                self.heatmap_ax.set_title('보상 컴포넌트 히트맵', fontsize=12)
-                plt.colorbar(im, ax=self.heatmap_ax, fraction=0.046, pad=0.04)
-        
-        # 6. 실패 원인 분석
-        self.failure_ax.clear()
-        if self.failure_reasons:
-            # 전체 실패 원인 집계
-            all_failures = {}
-            for failure_dict in self.failure_reasons:
-                for reason, count in failure_dict.items():
-                    all_failures[reason] = all_failures.get(reason, 0) + count
+        """실시간으로 학습 진행 상황 그래프를 이미지 파일로 저장합니다."""
+        if len(self.rewards_history) < 2:
+            return
+
+        fig = None  # 예외 발생 시 fig 변수가 없을 수 있으므로 초기화
+        try:
+            fig, ax = plt.subplots(figsize=(12, 7))
+            timesteps = self.timesteps_history
+            rewards = self.rewards_history
+
+            ax.plot(timesteps, rewards, 'b-', linewidth=2, label='평균 보상')
+
+            # 이동 평균선 추가
+            if len(rewards) >= 10:
+                window = 10
+                ma = np.convolve(rewards, np.ones(window)/window, mode='valid')
+                ax.plot(timesteps[window-1:], ma, 'r--', linewidth=2, label=f'이동평균 ({window}-evals)')
+
+            ax.set_title('실시간 학습 진행 상황: 평균 보상', fontsize=16)
+            ax.set_xlabel('Timesteps')
+            ax.set_ylabel('평균 보상')
+            ax.grid(True, alpha=0.4)
+            ax.legend()
+            fig.tight_layout()
+
+            save_path = "./training_progress.png"
+            plt.savefig(save_path, dpi=100)
             
-            if all_failures:
-                reasons = list(all_failures.keys())
-                counts = list(all_failures.values())
-                colors = plt.cm.Reds(np.linspace(0.4, 0.8, len(reasons)))
-                self.failure_ax.pie(counts, labels=reasons, colors=colors, 
-                                  autopct='%1.0f%%', startangle=90)
-                self.failure_ax.set_title('실패 원인 분포', fontsize=12)
-        
-        plt.tight_layout()
-        plt.pause(0.1)
-   
+        except Exception as e:
+            print(f"❌ 실시간 그래프 저장 중 오류 발생: {e}")
+        finally:
+            if fig is not None:
+                plt.close(fig) # 리소스 누수를 방지하기 위해 항상 figure를 닫음
+
     def save_detailed_analysis(self, save_path: str):
         """상세 분석 보고서 저장"""
         os.makedirs(save_path, exist_ok=True)
         
-        # 1. 컴포넌트 상관관계 분석
         if len(self.reward_components_history) > 10:
             components_df = pd.DataFrame(self.reward_components_history)
             
@@ -597,7 +527,6 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             plt.yticks(range(len(corr.columns)), corr.columns)
             plt.title('보상 컴포넌트 간 상관관계')
             
-            # 상관계수 표시
             for i in range(len(corr.columns)):
                 for j in range(len(corr.columns)):
                     plt.text(j, i, f'{corr.iloc[i, j]:.2f}', 
@@ -608,11 +537,9 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             plt.savefig(f"{save_path}/component_correlation.png", dpi=300)
             plt.close()
         
-        # 2. 학습 단계별 분석
         if self.use_curriculum and self.curriculum_stages:
             plt.figure(figsize=(12, 8))
             
-            # 스테이지별 성공률
             stage_success = {}
             for i, stage in enumerate(self.curriculum_stages):
                 if stage not in stage_success:
@@ -628,7 +555,6 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             plt.title('커리큘큘럼 단계별 성공률')
             plt.legend()
             
-            # 스테이지 진행 시간
             plt.subplot(2, 1, 2)
             plt.plot(self.timesteps_history, self.curriculum_stages, 'o-')
             plt.xlabel('Timesteps')
@@ -640,7 +566,6 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             plt.savefig(f"{save_path}/curriculum_analysis.png", dpi=300)
             plt.close()
         
-        # 3. JSON 형식으로 전체 데이터 저장
         analysis_data = {
             'summary': {
                 'total_evaluations': len(self.rewards_history),
@@ -689,6 +614,8 @@ class VideoRecordingCallback(BaseCallback):
         
         print(f"🎥 비디오 녹화 설정: {show_duration_seconds}초간 녹화")
     
+    # 파일명: training_callback.py -> 클래스명: VideoRecordingCallback
+
     def _on_step(self) -> bool:
         if not self.moviepy_available:
             return True
