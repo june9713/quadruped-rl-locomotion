@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>학습률 현황</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 { 
+            text-align: center;
+            color: #444;
+        }
+        .button-container { 
+            margin-bottom: 20px; 
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background-color: #007bff;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        img { 
+            max-width: 100%; 
+            height: auto; 
+            display: block; 
+            margin: 20px auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 5px;
+            background-color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="button-container">
+            <button onclick="location.href='/main'">비디오 보기</button>
+        </div>
+        <h1>학습률 현황</h1>
+        <img src="/training_progress.png" alt="Training Progress Image">
+    </div>
+</body>
+</html>

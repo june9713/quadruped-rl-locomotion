@@ -38,6 +38,7 @@ class Go1MujocoEnv(MujocoEnv):
         0.0, 2.8, -1.2,    # RL
     ])
 
+    # 파일명: go1_mujoco_env.py -> 클래스명: Go1MujocoEnv -> 함수명: __init__
     def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, **kwargs):
         model_path = Path(f"./unitree_go1/scene_{ctrl_type}.xml")
         self.biped = biped
@@ -68,8 +69,6 @@ class Go1MujocoEnv(MujocoEnv):
         self.reward_weights = {
             "linear_vel_tracking": 2.0,
             "angular_vel_tracking": 1.0,
-            # [✅ 최종 수정] 생존 보상 가중치를 대폭 상향 (0.1 -> 2.0)
-            # 에이전트가 어떻게든 버티도록 강력하게 유도합니다.
             "healthy": 2.0,
             "feet_airtime": 1.0,
         }
@@ -87,16 +86,17 @@ class Go1MujocoEnv(MujocoEnv):
         }
 
         if self.biped:
-            # [✅ 최종 수정] 수직 자세 유지 보상 가중치를 대폭 상향 (5.0 -> 15.0)
-            # 넘어져서 받는 페널티보다 서 있으면서 얻는 보상이 훨씬 크도록 만듭니다.
             self.reward_weights["biped_upright"] = 15.0
-            self.cost_weights["biped_front_contact"] = 10.0
+            self.cost_weights["biped_front_contact"] = 50.0
             self.cost_weights["biped_rear_feet_airborne"] = 5.0
-            # [💡 추가] 앞발이 무릎보다 낮아질 때 받는 페널티 가중치
             self.cost_weights["biped_front_foot_height"] = 8.0
-            # [🚀 신규 추가] 뒷다리가 꼬이거나 너무 낮아지는 것에 대한 페널티 가중치
             self.cost_weights["biped_crossed_legs"] = 5.0
-            self.cost_weights["biped_low_rear_hips"] = 7.0
+            self.cost_weights["biped_low_rear_hips"] = 9.0
+            self.cost_weights["biped_front_feet_below_hips"] = 6.0
+            self.cost_weights["biped_abduction_joints"] = 0.7
+            self.cost_weights["biped_unwanted_contact"] = 150.0
+            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 가중치
+            self.cost_weights["self_collision"] = 25.0
 
 
         self._curriculum_base = 0.3
@@ -159,9 +159,7 @@ class Go1MujocoEnv(MujocoEnv):
             self.model, mujoco.mjtObj.mjOBJ_BODY.value, "trunk"
         )
 
-        # [💡 추가] 이족 보행 시 앞발 높이 페널티 계산을 위한 ID 초기화
         if self.biped:
-            # XML 모델에 정의된 body 이름을 사용해야 합니다. (예: "FR_calf", "FL_calf")
             front_knee_body_names = ["FR_calf", "FL_calf"]
             self._front_knee_body_ids = [
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
@@ -171,13 +169,92 @@ class Go1MujocoEnv(MujocoEnv):
                 self._feet_site_name_to_id["FR"],
                 self._feet_site_name_to_id["FL"]
             ]
-            # [🚀 신규 추가] 이족 보행 시 뒷다리 페널티 계산을 위한 ID 초기화
             rear_hip_body_names = ["RR_hip", "RL_hip"]
             self._rear_hip_body_ids = [
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
                 for name in rear_hip_body_names
             ]
-            self._rear_hips_min_height = 0.3  # 뒷다리 고관절 최소 높이 (미터 단위)
+            self._rear_hips_min_height = 0.2
+            
+            front_hip_body_names = ["FR_hip", "FL_hip"]
+            self._front_hip_body_ids = [
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in front_hip_body_names
+            ]
+            
+            unwanted_contact_body_names = [
+                "trunk",
+                "FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh",
+                "FR_calf", "FL_calf",
+            ]
+            self._unwanted_contact_body_ids = [
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in unwanted_contact_body_names
+            ]
+
+            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 감지를 위한 body ID 세트
+            self._front_right_limb_body_ids = {
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in ["FR_hip", "FR_thigh", "FR_calf"]
+            }
+            self._front_left_limb_body_ids = {
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in ["FL_hip", "FL_thigh", "FL_calf"]
+            }
+            self._rear_right_limb_body_ids = {
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in ["RR_hip", "RR_thigh", "RR_calf"]
+            }
+            self._rear_left_limb_body_ids = {
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+                for name in ["RL_hip", "RL_thigh", "RL_calf"]
+            }
+
+
+    @property
+    def self_collision_cost(self):
+        """[✨ 신규 추가] 이족 보행 시, 팔과 다리의 자기-충돌에 대한 페널티를 계산합니다.
+        
+        모든 접촉점을 확인하여, (오른쪽 앞다리 - 왼쪽 앞다리) 또는 
+        (오른쪽 뒷다리 - 왼쪽 뒷다리) 간의 충돌이 발생하면 페널티 카운트를 증가시킵니다.
+        """
+        cost = 0
+        # 시뮬레이션의 모든 접촉(contact)을 순회합니다.
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            
+            # 접촉에 관여된 두 geom이 속한 body의 ID를 가져옵니다.
+            body1_id = self.model.geom_bodyid[contact.geom1]
+            body2_id = self.model.geom_bodyid[contact.geom2]
+
+            # 앞다리(팔) 간의 충돌 확인
+            is_front_right_limb_contact = body1_id in self._front_right_limb_body_ids
+            is_front_left_limb_contact = body2_id in self._front_left_limb_body_ids
+            if is_front_right_limb_contact and is_front_left_limb_contact:
+                cost += 1.0
+                continue # 이미 충돌을 확인했으므로 다음 접촉으로 넘어갑니다.
+
+            # (반대 순서로도 확인)
+            is_front_right_limb_contact = body2_id in self._front_right_limb_body_ids
+            is_front_left_limb_contact = body1_id in self._front_left_limb_body_ids
+            if is_front_right_limb_contact and is_front_left_limb_contact:
+                cost += 1.0
+                continue
+
+            # 뒷다리 간의 충돌 확인
+            is_rear_right_limb_contact = body1_id in self._rear_right_limb_body_ids
+            is_rear_left_limb_contact = body2_id in self._rear_left_limb_body_ids
+            if is_rear_right_limb_contact and is_rear_left_limb_contact:
+                cost += 1.0
+                continue
+
+            # (반대 순서로도 확인)
+            is_rear_right_limb_contact = body2_id in self._rear_right_limb_body_ids
+            is_rear_left_limb_contact = body1_id in self._rear_left_limb_body_ids
+            if is_rear_right_limb_contact and is_rear_left_limb_contact:
+                cost += 1.0
+
+        return cost
 
     @property
     def biped_crossed_legs_cost(self):
@@ -200,10 +277,10 @@ class Go1MujocoEnv(MujocoEnv):
 
     @property
     def biped_low_rear_hips_cost(self):
-        """[🚀 신규 추가] 이족 보행 시 뒷다리 고관절이 너무 낮아지는 것에 대한 페널티 함수입니다.
+        """[🚀 신규 추가 & ✅ 수정] 이족 보행 시 뒷다리 고관절이 너무 낮아지는 것에 대한 페널티 함수입니다.
         
         각 뒷다리 고관절의 Z좌표가 미리 정의된 최소 높이(_rear_hips_min_height)보다
-        낮아질 경우, 그 차이만큼 페널티를 부과합니다.
+        낮아질 경우, 그 차이만큼 페널티를 부과합니다. 이 기준값은 땅에 거의 닿는 수준으로 설정됩니다.
         """
         rear_hips_pos = self.data.xpos[self._rear_hip_body_ids]
         
@@ -215,6 +292,29 @@ class Go1MujocoEnv(MujocoEnv):
         
         # 기준보다 높은 경우(음수 값)는 페널티가 없도록 0으로 만듭니다.
         cost = np.sum(height_difference.clip(min=0.0))
+        
+        return cost*10.0
+
+    @property
+    def biped_front_feet_below_hips_cost(self):
+        """[✅ 추가] 앞발이 앞쪽 고관절보다 낮아지는 것에 대한 페널티 함수입니다.
+        
+        앞발(site)의 Z좌표가 앞쪽 고관절(hip body)의 Z좌표보다 낮을 경우,
+        그 차이의 제곱만큼 페널티를 부과하여 더 강력하게 제지합니다.
+        """
+        front_feet_pos = self.data.site_xpos[self._front_feet_site_ids]
+        front_hips_pos = self.data.xpos[self._front_hip_body_ids]
+
+        # Z 좌표(높이)만 추출합니다.
+        feet_z = front_feet_pos[:, 2]
+        hips_z = front_hips_pos[:, 2]
+
+        # 고관절 높이에서 발 높이를 뺍니다. 이 값이 양수이면 발이 더 낮은 것입니다.
+        height_difference = hips_z - feet_z
+        
+        # 발이 고관절보다 높은 경우(음수 값)는 페널티가 없도록 0으로 만듭니다.
+        # 차이의 제곱을 사용하여 더 낮은 위치에 대해 더 큰 페널티를 부과합니다.
+        cost = np.sum(np.square(height_difference.clip(min=0.0)))
         
         return cost
 
@@ -500,6 +600,32 @@ class Go1MujocoEnv(MujocoEnv):
     def default_joint_position_cost(self):
         return np.sum(np.square(self.data.qpos[7:] - self._default_joint_position))
 
+
+    @property
+    def biped_abduction_joints_cost(self):
+        """[✨ 신규 추가] 이족 보행 시 어깨/엉덩이 관절(abduction)이 0에 가깝도록 유도하는 페널티입니다.
+        
+        관련 관절 각도의 제곱 합을 계산하여, 0에서 벗어날수록 더 큰 페널티를 부과합니다.
+        (Indices: 0=FR_hip, 3=FL_hip, 6=RR_hip, 9=RL_hip)
+        """
+        abduction_joints_indices = [0, 3, 6, 9]
+        dofs_position = self.data.qpos[7:]
+        abduction_angles = dofs_position[abduction_joints_indices]
+        
+        return np.sum(np.square(abduction_angles))
+
+    @property
+    def biped_unwanted_contact_cost(self):
+        """[✨ 신규 추가] 이족 보행 시, 뒷발을 제외한 신체 부위의 접촉에 대해 큰 페널티를 부과합니다.
+        
+        몸통(trunk), 모든 허벅지(thighs), 앞쪽 종아리(calves)의 접촉 힘을 확인하고,
+        접촉이 발생하면 힘의 제곱에 비례하는 페널티를 적용합니다.
+        """
+        contact_forces = self.data.cfrc_ext[self._unwanted_contact_body_ids]
+        # 각 부위별 접촉 힘의 크기(norm)를 계산하고, 그 값의 제곱 합을 페널티로 사용합니다.
+        cost = np.sum(np.square(np.linalg.norm(contact_forces, axis=1)))
+        return cost
+
     @property
     def smoothness_cost(self):
         return np.sum(np.square(self.data.qpos[7:] - self._last_action))
@@ -574,12 +700,15 @@ class Go1MujocoEnv(MujocoEnv):
         if self.biped:
             upright_reward = self.biped_upright_reward * self.reward_weights["biped_upright"]
             front_contact_cost = self.biped_front_contact_cost * self.cost_weights["biped_front_contact"]
-            # [💡 추가] 앞발 높이 페널티 계산
             front_foot_height_cost = self.biped_front_foot_height_cost * self.cost_weights["biped_front_foot_height"]
-            
-            # [🚀 신규 추가] 뒷다리 관련 페널티 계산
             crossed_legs_cost = self.biped_crossed_legs_cost * self.cost_weights["biped_crossed_legs"]
             low_rear_hips_cost = self.biped_low_rear_hips_cost * self.cost_weights["biped_low_rear_hips"]
+            front_feet_below_hips_cost = self.biped_front_feet_below_hips_cost * self.cost_weights["biped_front_feet_below_hips"]
+            abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
+            unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
+            
+            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 계산
+            self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
 
 
             rear_feet_airborne_cost = 0.0
@@ -589,27 +718,33 @@ class Go1MujocoEnv(MujocoEnv):
             rewards += upright_reward
             costs += front_contact_cost
             costs += rear_feet_airborne_cost
-            # [💡 추가] 계산된 앞발 높이 페널티를 총 비용에 추가
             costs += front_foot_height_cost
-            # [🚀 신규 추가] 계산된 뒷다리 관련 페널티를 총 비용에 추가
             costs += crossed_legs_cost
             costs += low_rear_hips_cost
+            costs += front_feet_below_hips_cost
+            costs += abduction_joints_cost
+            costs += unwanted_contact_cost
+            
+            # ✨ [신규 추가] 요청사항 반영: 계산된 페널티를 총 비용에 추가
+            costs += self_collision_cost_val
 
 
             reward_info["biped_upright_reward"] = upright_reward
             reward_info["biped_front_contact_cost"] = -front_contact_cost
             reward_info["biped_rear_feet_airborne_cost"] = -rear_feet_airborne_cost
-            # [💡 추가] 정보 로깅을 위해 reward_info에 추가
             reward_info["biped_front_foot_height_cost"] = -front_foot_height_cost
-            # [🚀 신규 추가] 정보 로깅을 위해 reward_info에 추가
             reward_info["biped_crossed_legs_cost"] = -crossed_legs_cost
             reward_info["biped_low_rear_hips_cost"] = -low_rear_hips_cost
-            # [✅ 최종 수정] 이족 보행 모드에서는 default_joint_position_cost를 적용하지 않습니다.
-            # 이 페널티는 4족 보행 자세를 기준으로 하므로, 이족 보행 학습에 방해가 됩니다.
+            reward_info["biped_front_feet_below_hips_cost"] = -front_feet_below_hips_cost
+            reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
+            reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
+
+            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 정보 로깅
+            reward_info["self_collision_cost"] = -self_collision_cost_val
 
         else: # 4족 보행 모드
             costs += orientation_cost
-            costs += default_joint_position_cost # 4족 보행 모드에서만 적용
+            costs += default_joint_position_cost
             reward_info["orientation_cost"] = -orientation_cost
             reward_info["default_joint_position_cost"] = -default_joint_position_cost
 

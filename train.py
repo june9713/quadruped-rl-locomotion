@@ -10,22 +10,16 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from go1_mujoco_env import Go1MujocoEnv
 from tqdm import tqdm
-
-import argparse
-import os
-import time
-from pathlib import Path
-
-import gymnasium as gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.env_util import make_vec_env
-from go1_mujoco_env import Go1MujocoEnv
-from tqdm import tqdm
 from stable_baselines3.common.callbacks import CallbackList
 from training_callback import VideoRecordingCallback # VisualTrainingCallback import 추가
 from training_callback import VideoRecordingCallback, EnhancedVisualCallback
+
+# ✨ --- 수정된 부분 시작 --- ✨
+# Tcl/Tk 오류를 방지하기 위해 GUI 백엔드 대신 Agg 백엔드를 사용하도록 설정합니다.
+# 이 코드는 matplotlib.pyplot을 import하기 전에 실행되어야 합니다.
+import matplotlib
+matplotlib.use('Agg')
+# ✨ --- 수정된 부분 끝 --- ✨
 
 # training_callback.py 파일 상단에 추가해주세요.
 import matplotlib.pyplot as plt
@@ -212,7 +206,3 @@ if __name__ == "__main__":
         os.makedirs(MODEL_DIR, exist_ok=True)
         os.makedirs(LOG_DIR, exist_ok=True)
         train(args)
-    elif args.run == "test":
-        if args.model_path is None:
-            raise ValueError("--model_path is required for testing")
-        test(args)

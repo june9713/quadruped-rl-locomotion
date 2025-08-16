@@ -117,13 +117,11 @@ class VisualTrainingCallback(BaseCallback):
         self.timesteps_history = []
         
     def _on_step(self) -> bool:
-        current_time = time.time()
-        
-        # 지정된 시간 간격마다 평가 및 시각화
-        if self.step_zero or (current_time - self.last_eval_time >= self.eval_interval_seconds):
+        # eval_freq 간격으로 평가를 수행하며, 학습 시작 시점(self.step_zero)에도 첫 평가를 수행합니다.
+        if self.step_zero or (self.num_timesteps - self.last_eval_timestep >= self.eval_freq):
             self.step_zero = False
             self._evaluate_and_visualize()
-            self.last_eval_time = current_time
+            self.last_eval_timestep = self.num_timesteps
             
         return True
     
@@ -667,8 +665,8 @@ class VideoRecordingCallback(BaseCallback):
 
                         # ✨ 추가된 부분: 상세한 종료 원인과 값을 직접 출력
                         details = current_info.get('termination_details', '세부 정보 없음.')
-                        print(f"      - 종료 발생: {base_reason}")
-                        print(f"        └> 상세 정보: {details}")
+                        #print(f"      - 종료 발생: {base_reason}")
+                        #print(f"        └> 상세 정보: {details}")
                     
                     obs, _ = self.record_env.reset()
             

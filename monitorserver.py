@@ -7,6 +7,8 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
+# 상단 from fastapi.responses ... 라인을 찾아서 FileResponse 를 추가합니다.
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 
 # --- 설정 ---
 # 비디오 파일이 있는 폴더 이름
@@ -67,12 +69,52 @@ async def index(request: Request):
         return HTMLResponse(content="<h1>서버 실행 중</h1><p>'templates/index.html' 파일을 생성해주세요.</p>", status_code=200)
     return templates.TemplateResponse("index.html", {"request": request, "videos": videos, "VIDEO_DIR_NAME": VIDEO_DIR_NAME})
 
+
+@app.get("/showimage", response_class=HTMLResponse)
+async def show_image_page(request: Request):
+    """
+    학습 진행률 이미지를 보여주는 페이지를 렌더링합니다.
+    """
+    return templates.TemplateResponse("showimage.html", {"request": request})
+
+
+@app.get("/training_progress.png")
+async def get_training_image():
+    """
+    training_progress.png 이미지 파일을 제공합니다.
+    """
+    image_path = BASE_DIR / "training_progress.png"
+    if not image_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="이미지 파일을 찾을 수 없습니다 (training_progress.png)"
+        )
+    return FileResponse(image_path)
+
+    
 @app.get("/api/videos")
 async def get_videos_api():
     """
     비디오 목록을 JSON API 형태로 반환합니다.
     """
     return {"videos": get_video_list()}
+
+@app.get("/main", response_class=HTMLResponse)
+async def main_page(request: Request):
+    """
+    메인 페이지를 렌더링하고 비디오 목록을 전달합니다.
+    """
+    videos = get_video_list()
+    # index.html 파일이 없으면 기본 안내 메시지를 표시
+    index_template_path = TEMPLATE_DIR / "index.html"
+    if not index_template_path.exists():
+        # 템플릿이 없을 경우를 대비한 대체 HTML에도 버튼 링크를 추가합니다.
+        return HTMLResponse(content="""
+            <h1>서버 실행 중</h1>
+            <a href="/showimage"><button style="margin-bottom: 20px;">학습률 현황 보기</button></a>
+            <p>'templates/index.html' 파일을 생성해주세요.</p>
+            """, status_code=200)
+    return templates.TemplateResponse("index.html", {"request": request, "videos": videos, "VIDEO_DIR_NAME": VIDEO_DIR_NAME})
 
 
 def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
