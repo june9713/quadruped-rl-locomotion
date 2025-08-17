@@ -272,7 +272,7 @@ class EnhancedVisualCallback(VisualTrainingCallback):
     개선된 시각화 콜백 - 실시간 그래프를 이미지 파일로 저장합니다.
     """
     
-    def __init__(self, *args, use_curriculum=False, best_model_save_path: str = None, **kwargs):
+    def __init__(self, *args, use_curriculum=False, best_model_save_path: str = None, load_history_from: str = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.use_curriculum = use_curriculum
         
@@ -292,6 +292,43 @@ class EnhancedVisualCallback(VisualTrainingCallback):
         
         # --- 스레딩 관련 코드 제거 ---
         print("\n📈 실시간 학습 그래프는 현재 디렉토리에 'realtime_progress.png' 파일로 주기적으로 저장됩니다.")
+        
+        # ✨ [추가] 학습 기록 불러오기
+        if load_history_from:
+            self._load_history(load_history_from)
+
+    def _load_history(self, path: str):
+        """저장된 학습 기록을 .json 파일에서 불러옵니다."""
+        if not os.path.exists(path):
+            print(f"⚠️ 학습 기록 파일을 찾을 수 없습니다: {path}. 새로운 기록을 시작합니다.")
+            return
+        
+        try:
+            with open(path, 'r') as f:
+                history = json.load(f)
+            
+            # 이전 기록 불러오기
+            self.best_mean_reward = history.get('best_mean_reward', -np.inf)
+            self.rewards_history = history.get('rewards_history', [])
+            self.lengths_history = history.get('lengths_history', [])
+            self.success_rates = history.get('success_rates', [])
+            self.timesteps_history = history.get('timesteps_history', [])
+            self.reward_components_history = history.get('reward_components_history', [])
+            self.stability_metrics = history.get('stability_metrics', [])
+            self.failure_reasons = history.get('failure_reasons', [])
+            
+            # eval_count는 기록된 데이터의 길이로 설정
+            self.eval_count = len(self.rewards_history)
+            
+            if self.timesteps_history:
+                print(f"✅ 학습 기록을 성공적으로 불러왔습니다: {path}")
+                print(f"   - {self.eval_count}개의 이전 평가 지점에서 이어갑니다.")
+                print(f"   - 마지막 Timestep: {self.timesteps_history[-1]:,}, 최고 보상: {self.best_mean_reward:.2f}")
+            else:
+                print("   - 불러온 기록이 비어있습니다. 새로운 기록을 시작합니다.")
+
+        except Exception as e:
+            print(f"❌ 학습 기록 파일 불러오기 오류: {e}. 새로운 기록을 시작합니다.")
    
     def _evaluate_and_visualize(self):
         """개선된 평가 및 시각화"""
@@ -446,10 +483,33 @@ class EnhancedVisualCallback(VisualTrainingCallback):
         if self.best_model_save_path is not None:
             if mean_reward > self.best_mean_reward:
                 self.best_mean_reward = mean_reward
-                print(f"\n🚀 New best mean reward: {self.best_mean_reward:.2f} (at timestep {self.num_timesteps})")
+                print(f"\n🚀 새로운 최고 평균 보상 달성: {self.best_mean_reward:.2f} (Timestep: {self.num_timesteps:,})")
+                
+                # 최고 모델 저장
                 save_path = os.path.join(self.best_model_save_path, "best_model.zip")
                 self.model.save(save_path)
-                print(f"💾 Best model saved to {save_path}")
+                print(f"💾 최고 모델 저장 완료: {save_path}")
+
+                # ✨ [추가] 학습 기록 저장 로직
+                history_data = {
+                    'best_mean_reward': self.best_mean_reward,
+                    'rewards_history': self.rewards_history,
+                    'lengths_history': self.lengths_history,
+                    'success_rates': self.success_rates,
+                    'timesteps_history': self.timesteps_history,
+                    'reward_components_history': self.reward_components_history,
+                    'stability_metrics': self.stability_metrics,
+                    'failure_reasons': self.failure_reasons,
+                }
+                history_save_path = os.path.join(self.best_model_save_path, "training_history.json")
+                try:
+                    with open(history_save_path, 'w') as f:
+                        # numpy 타입을 python 기본 타입으로 변환하여 저장
+                        json.dump(history_data, f, indent=4, default=float)
+                    print(f"💾 학습 기록 저장 완료: {history_save_path}")
+                except Exception as e:
+                    print(f"❌ 학습 기록 저장 실패: {e}")
+
 
         avg_components = {}
         if components:

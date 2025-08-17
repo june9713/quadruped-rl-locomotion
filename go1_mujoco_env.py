@@ -38,7 +38,6 @@ class Go1MujocoEnv(MujocoEnv):
         0.0, 2.8, -1.2,    # RL
     ])
 
-    # 파일명: go1_mujoco_env.py -> 클래스명: Go1MujocoEnv -> 함수명: __init__
     def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, **kwargs):
         model_path = Path(f"./unitree_go1/scene_{ctrl_type}.xml")
         self.biped = biped
@@ -69,8 +68,9 @@ class Go1MujocoEnv(MujocoEnv):
         self.reward_weights = {
             "linear_vel_tracking": 2.0,
             "angular_vel_tracking": 1.0,
-            "healthy": 2.0,
-            "feet_airtime": 1.0,
+            "healthy": 1.0,
+            # ✅ [수정] 큰 걸음 유도를 위해 feet_airtime 보상의 가중치를 대폭 상향합니다.
+            "feet_airtime": 5.0, 
         }
         self.cost_weights = {
             "torque": 0.0002,
@@ -79,7 +79,8 @@ class Go1MujocoEnv(MujocoEnv):
             "action_rate": 0.01,
             "joint_limit": 10.0,
             "joint_velocity": 0.01,
-            "joint_acceleration": 2.5e-7,
+            # ✅ [수정] 종종걸음(빠른 발놀림)을 억제하기 위해 가속도 페널티 가중치를 10배 상향합니다.
+            "joint_acceleration": 2.0e-4,
             "orientation": 1.0,
             "collision": 1.0,
             "default_joint_position": 0.1
@@ -102,9 +103,10 @@ class Go1MujocoEnv(MujocoEnv):
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
         self._default_joint_position = np.array(self.model.key_ctrl[0])
-
-        self._desired_velocity_min = np.array([0.5, -0.0, -0.0])
-        self._desired_velocity_max = np.array([0.5, 0.0, 0.0])
+        
+        # 현재는 제자리 걸음 상태이므로, 이 부분은 그대로 둡니다.
+        self._desired_velocity_min = np.array([0.0, -0.0, -0.0])
+        self._desired_velocity_max = np.array([0.0, 0.0, 0.0])
         self._desired_velocity = self._sample_desired_vel()
         self._obs_scale = {
             "linear_velocity": 2.0,
@@ -210,6 +212,28 @@ class Go1MujocoEnv(MujocoEnv):
                 for name in ["RL_hip", "RL_thigh", "RL_calf"]
             }
 
+    @property
+    def acceleration_cost(self):
+        """[✅ 수정] 실제 모터 특성을 반영하여 관절 가속도 페널티를 동적으로 조절합니다.
+
+        관절 속도가 낮을 때 높은 가속이 발생하면 (짧고 빠른 진동) 더 큰 페널티를,
+        속도가 높을 때 높은 가속이 발생하면 (움직임을 위한 자연스러운 가속) 더 작은 페널티를 부과합니다.
+        이를 통해 불필요하게 빠른 발놀림을 줄이고 더 부드러운 움직임을 유도합니다.
+        페널티는 (가속도^2) / (ㅣ속도ㅣ + ε) 에 비례하여 계산됩니다.
+        """
+        # 관절 속도의 절댓값과 관절 가속도를 가져옵니다.
+        joint_velocities = np.abs(self.data.qvel[6:])
+        joint_accelerations = self.data.qacc[6:]
+        
+        # 속도가 0에 가까울 때 분모가 0이 되는 것을 방지하기 위한 작은 값(epsilon)입니다.
+        epsilon = 1e-6
+        
+        # 속도가 낮은 상태에서의 급가속에 더 큰 페널티를 부과하는 동적 페널티를 계산합니다.
+        dynamic_penalty = np.sum(
+            np.square(joint_accelerations) / (joint_velocities + epsilon)
+        )
+        
+        return dynamic_penalty
 
     @property
     def self_collision_cost(self):
@@ -513,27 +537,35 @@ class Go1MujocoEnv(MujocoEnv):
 
     @property
     def feet_air_time_reward(self):
-        """Award strides depending on their duration only when the feet makes contact with the ground"""
+        """[✅ 수정] 큰 걸음을 유도하기 위해, 발이 공중에 머무는 시간의 '제곱'에 비례한 보상을 줍니다.
+        
+        기존의 선형적인 보상 방식(air_time - 0.2) 대신, air_time의 제곱을 사용합니다.
+        이를 통해 공중에 약간 더 길게 머무르는 행동에 훨씬 더 큰 보상을 부여하여, 
+        에이전트가 더 동적이고 큰 보폭을 취하도록 강력하게 유도합니다.
+        최소 시간(0.2초)을 넘겼을 때만 보상을 주는 조건은 유지합니다.
+        """
         feet_contact_force_mag = self.feet_contact_forces
         curr_contact = feet_contact_force_mag > 1.0
 
-        # --- 제안 3: 이족 보행 시 교차 보상 추가 ---
+        # --- 이족 보행 시 교차 보상 로직 (기존과 동일) ---
         if self.biped:
-            # 뒷다리(RR, RL)의 접촉 상태만 사용
             rear_feet_contact = curr_contact[2:]
-            # 한 발은 닿고, 다른 한 발은 떨어져 있을 때 1.0의 보상
             is_alternating = (rear_feet_contact[0] != rear_feet_contact[1])
             return float(is_alternating)
-        # --- 제안 3 끝 ---
+        # --- 로직 끝 ---
 
-        # (기존 네 발 보행 로직은 그대로 유지)
         contact_filter = np.logical_or(curr_contact, self._last_contacts)
         self._last_contacts = curr_contact
 
         first_contact = (self._feet_air_time > 0.0) * contact_filter
         self._feet_air_time += self.dt
 
-        air_time_reward = np.sum((self._feet_air_time - 0.2) * first_contact)
+        # ✅ [수정] 보상 계산 방식을 선형에서 제곱으로 변경
+        # air_time이 0.2를 넘는 구간에 대해서 제곱의 보상을 줍니다.
+        time_since_threshold = (self._feet_air_time - 0.2).clip(min=0.0)
+        air_time_reward = np.sum(np.square(time_since_threshold) * first_contact)
+        
+        # 목표 속도가 매우 낮을 때는 보상을 주지 않는 조건 (기존과 동일)
         air_time_reward *= np.linalg.norm(self._desired_velocity[:2]) > 0.1
 
         self._feet_air_time *= ~contact_filter

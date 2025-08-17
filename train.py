@@ -71,42 +71,61 @@ def train(args):
         f"Training on {args.num_parallel_envs} parallel training environments and saving models to '{model_path}'"
     )
 
-    # ✨ 수정된 부분: EnhancedVisualCallback의 평가 주기를 timestep 기반으로 변경
-    # 비디오 녹화 주기(args.video_interval)와 동일하게 설정하여, 비디오가 녹화될 때마다
-    # 평가, 모델 저장, 그래프 업데이트가 함께 수행되도록 합니다.
+    # ✨ [수정] 학습 기록 불러오기 경로 설정
+    history_load_path = None
+    if args.model_path:
+        # 불러올 모델과 같은 디렉토리에서 학습 기록 파일을 찾습니다.
+        model_dir = os.path.dirname(args.model_path)
+        potential_history_path = os.path.join(model_dir, "training_history.json")
+        if os.path.exists(potential_history_path):
+            history_load_path = potential_history_path
+            print(f"✅ 이전 학습 기록을 발견했습니다: {history_load_path}")
+        else:
+            print(f"⚠️ 이전 학습 기록 파일을 찾지 못했습니다 ({potential_history_path}). 새로운 그래프를 시작합니다.")
+
+    # ✨ [수정] 콜백 생성 시, load_history_from 인자 전달
     enhanced_callback = EnhancedVisualCallback(
         eval_env=eval_record_env,
         best_model_save_path=model_path,
-        eval_freq=args.video_interval,  # 분(minutes) 단위 대신 timestep 단위로 변경
+        eval_freq=args.video_interval,
         n_eval_episodes=3,
         show_duration_seconds=20,
-        save_videos=True, # 평가 중 비디오 저장 활성화
+        save_videos=True,
+        load_history_from=history_load_path, # 이 부분을 추가했습니다.
     )
     
-    # 훈련 중 주기적인 비디오 녹화 콜백 (step 기반)
     video_callback = VideoRecordingCallback(
         record_env=eval_record_env,
         record_interval_timesteps=args.video_interval,
         show_duration_seconds=args.video_duration
     )
     
-    # ✨ 추가된 부분: rand_power 커리큘럼 콜백
-    # 학습 진행도에 따라 rand_power를 동적으로 조절합니다.
     from training_callback import CurriculumCallback
     curriculum_callback = CurriculumCallback(
         total_timesteps=args.total_timesteps,
         initial_rand_power=args.rand_power
     )
 
-    # 세 개의 콜백을 함께 사용
     callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback])
 
+    # ✨ [수정] PPO 모델을 불러오거나 생성할 때 learning_rate 인자 추가
     if args.model_path is not None:
         model = PPO.load(
-            path=args.model_path, env=vec_env, verbose=1, tensorboard_log=LOG_DIR
+            path=args.model_path, 
+            env=vec_env, 
+            verbose=1, 
+            tensorboard_log=LOG_DIR,
+            learning_rate=args.learning_rate  # 기존 모델에 새로운 학습률 적용
         )
+        print(f"✅ 모델을 성공적으로 불러왔습니다: {args.model_path}")
     else:
-        model = PPO("MlpPolicy", vec_env, verbose=1, tensorboard_log=LOG_DIR)
+        model = PPO(
+            "MlpPolicy", 
+            vec_env, 
+            verbose=1, 
+            tensorboard_log=LOG_DIR,
+            learning_rate=args.learning_rate  # 새 모델에 학습률 적용
+        )
 
     model.learn(
         total_timesteps=args.total_timesteps,
@@ -175,28 +194,31 @@ if __name__ == "__main__":
         action="store_true",
         help="If set, the robot will be trained for bipedal walking.",
     )
-
-    #video_duration
     parser.add_argument(
         "--video_duration",
         type=int,
-        default=10,
+        default=30,
         help="Duration of the video to record",
     )
-
     parser.add_argument(
         "--video_interval",
         type=int,
         default=300_000,
         help="Number of timesteps interval to record the video",
     )
-    
-    # ✨ 추가된 부분: 랜덤 강도 인자
     parser.add_argument(
         "--rand_power",
         type=float,
         default=0.0,
         help="Amount of randomization to apply to joint angles at reset. 0.0 means no randomization.",
+    )
+    
+    # ✨ [신규 추가] learning_rate 인자
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=3e-4,  # PPO의 기본값
+        help="The learning rate for the PPO optimizer.",
     )
 
     parser.add_argument("--seed", type=int, default=0)
