@@ -72,6 +72,7 @@ class Go1MujocoEnv(MujocoEnv):
             "healthy": 1.0,
             "feet_airtime": 5.0, 
             "recovery": 10.0,  # 회복 행동에 대한 보상 가중치
+            "get_up": 20.0,
         }
         self.cost_weights = {
             "torque": 0.0002,
@@ -214,6 +215,33 @@ class Go1MujocoEnv(MujocoEnv):
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
                 for name in ["RL_hip", "RL_thigh", "RL_calf"]
             }
+
+    @property
+    def get_up_reward(self):
+        """[✨ 신규 추가] 넘어진 상태에서 일어서려는 행동을 직접적으로 보상합니다.
+
+        이 보상은 두 가지 요소로 구성됩니다:
+        1. 몸통의 높이(CoM 높이): 땅에서 몸을 밀어내 높이를 올릴수록 큰 보상을 받습니다.
+        2. 몸통의 수평 유지: 몸통이 지면과 수평에 가까워질수록(뒤집히거나 옆으로 누운 상태에서 벗어날수록) 보상을 받습니다.
+        
+        이 함수는 로봇이 불건강(unhealthy) 상태일 때만 활성화됩니다.
+        """
+        is_ok, _, _ = self._get_health_status()
+        if is_ok:
+            return 0.0
+
+        # 1. 몸통의 높이에 대한 보상 (0.0 ~ 0.22 사이의 높이를 0~1로 정규화)
+        trunk_height = self.data.xpos[self._main_body_id][2]
+        # 목표 높이(healthy_z_range의 최소값)에 가까워질수록 보상이 커집니다.
+        height_reward = np.clip(trunk_height / self._healthy_z_range[0], 0.0, 1.0)
+
+        # 2. 몸통의 수평 상태에 대한 보상 (non_flat_base_cost를 보상으로 전환)
+        # projected_gravity의 x, y 성분이 0에 가까울수록(수평일수록) 보상이 커집니다.
+        orientation_goodness = 1.0 - np.sum(np.square(self.projected_gravity[:2]))
+        
+        # 두 보상을 조합하여 반환합니다. 높이에 더 큰 가중치를 둡니다.
+        return (height_reward * 1.5) + (orientation_goodness * 0.5)
+
 
     @property
     def acceleration_cost(self):
@@ -675,7 +703,13 @@ class Go1MujocoEnv(MujocoEnv):
     @property
     def torque_cost(self):
         # Last 12 values are the motor torques
-        return np.sum(np.square(self.data.qfrc_actuator[-12:]))
+        torque_val = np.sum(np.square(self.data.qfrc_actuator[-12:]))
+
+        # ✨ [수정] 불건강 상태일 때 페널티를 90% 할인하여 과감한 행동을 유도합니다.
+        is_ok, _, _ = self._get_health_status()
+        if not is_ok:
+            return torque_val * 0.1
+        return torque_val
 
     @property
     def vertical_velocity_cost(self):
@@ -686,7 +720,13 @@ class Go1MujocoEnv(MujocoEnv):
         return np.sum(np.square(self.data.qvel[3:5]))
 
     def action_rate_cost(self, action):
-        return np.sum(np.square(self._last_action - action))
+        action_rate_val = np.sum(np.square(self._last_action - action))
+
+        # ✨ [수정] 불건강 상태일 때 페널티를 90% 할인하여 과감한 행동을 유도합니다.
+        is_ok, _, _ = self._get_health_status()
+        if not is_ok:
+            return action_rate_val * 0.1
+        return action_rate_val
 
     @property
     def joint_velocity_cost(self):
@@ -694,7 +734,21 @@ class Go1MujocoEnv(MujocoEnv):
 
     @property
     def acceleration_cost(self):
-        return np.sum(np.square(self.data.qacc[6:]))
+        """[✅ 수정] 실제 모터 특성을 반영하여 관절 가속도 페널티를 동적으로 조절합니다.
+        ... (기존 주석) ...
+        """
+        joint_velocities = np.abs(self.data.qvel[6:])
+        joint_accelerations = self.data.qacc[6:]
+        epsilon = 1e-6
+        dynamic_penalty = np.sum(
+            np.square(joint_accelerations) / (joint_velocities + epsilon)
+        )
+        
+        # ✨ [수정] 불건강 상태일 때 페널티를 90% 할인하여 과감한 행동을 유도합니다.
+        is_ok, _, _ = self._get_health_status()
+        if not is_ok:
+            return dynamic_penalty * 0.1
+        return dynamic_penalty
 
     @property
     def default_joint_position_cost(self):
@@ -751,6 +805,8 @@ class Go1MujocoEnv(MujocoEnv):
         
         # ✨ [신규 추가] 회복 보상을 전체 보상에 추가합니다.
         recovery_reward = self.recovery_reward * self.reward_weights["recovery"]
+        # ✨ [신규 추가] 일어서기 보상을 전체 보상에 추가합니다.
+        get_up_reward = self.get_up_reward * self.reward_weights["get_up"]
 
         rewards = (
             linear_vel_tracking_reward
@@ -758,6 +814,7 @@ class Go1MujocoEnv(MujocoEnv):
             + healthy_reward
             + feet_air_time_reward
             + recovery_reward
+            + get_up_reward # ✨ 추가
         )
 
         # Negative Costs
@@ -804,8 +861,9 @@ class Go1MujocoEnv(MujocoEnv):
             "linear_vel_tracking_reward": linear_vel_tracking_reward,
             "reward_ctrl": -ctrl_cost,
             "reward_survive": healthy_reward,
-            "recovery_reward": recovery_reward, # 로그 추가
-            "unhealthy_state_cost": -unhealthy_state_cost, # 로그 추가
+            "recovery_reward": recovery_reward,
+            "get_up_reward": get_up_reward, # ✨ 로그 추가
+            "unhealthy_state_cost": -unhealthy_state_cost,
         }
 
         if self.biped:
@@ -891,7 +949,22 @@ class Go1MujocoEnv(MujocoEnv):
     def reset_model(self):
         qpos = self.model.key_qpos[0].copy()
 
-        if self.biped:
+        # ✨ [수정] 20% 확률로 넘어진 상태에서 시작하는 커리큘럼 학습 적용
+        if np.random.rand() < 0.2:
+            # 옆으로 또는 뒤로 누운 자세를 만듭니다.
+            # Roll 또는 Pitch 각도를 크게 주어 눕힙니다.
+            random_angle = np.random.uniform(np.pi / 2.1, np.pi / 1.5) # 85~120도 사이
+            
+            # Roll(옆으로) 또는 Pitch(앞뒤로) 중 무작위로 선택
+            if np.random.rand() < 0.5: # Roll
+                rot_quat = np.array([np.cos(random_angle / 2), np.sin(random_angle / 2), 0, 0])
+            else: # Pitch
+                rot_quat = np.array([np.cos(random_angle / 2), 0, np.sin(random_angle / 2), 0])
+
+            qpos[3:7] = rot_quat
+            qpos[2] = 0.1 # 높이를 낮게 설정
+        
+        elif self.biped:
             qpos[7:] = self.BIPEDAL_READY_JOINTS
             qpos[2] = 0.65
             pitch_angle = np.deg2rad(-95)
@@ -921,7 +994,6 @@ class Go1MujocoEnv(MujocoEnv):
         self._front_feet_touched = False
         self._last_feet_contact_forces = np.zeros(4)
         
-        # ✨ [신규 추가] 요청사항 반영: 추가된 상태 변수 초기화
         self._time_in_unhealthy_state = 0.0
         self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
 
