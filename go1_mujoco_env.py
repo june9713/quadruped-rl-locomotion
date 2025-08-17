@@ -33,7 +33,7 @@ class Go1MujocoEnv(MujocoEnv):
         # 앞다리 (FR, FL) - 몸쪽으로 당긴 상태
         0.0, 4.0, -2.0,    # FR
         0.0, 4.0, -2.0,    # FL
-        # 뒷다리 (RR, RL) - 더 안정적으로 웅크린 상태
+        # 뒷다리 (RR, RL) - 더 안정적으로 웅크린 상태   
         0.0, 2.8, -1.2,    # RR
         0.0, 2.8, -1.2,    # RL
     ])
@@ -61,16 +61,17 @@ class Go1MujocoEnv(MujocoEnv):
             "render_fps": 60,
         }
         self._last_render_time = -1.0
-        self._max_episode_time_sec = 15.0
+        self._max_episode_time_sec = 120.0
         self._step = 0
         self._front_feet_touched = False
 
+        # ✨ [신규 추가] 요청사항 반영: 회복 보상 및 불건강 상태 페널티 가중치
         self.reward_weights = {
             "linear_vel_tracking": 2.0,
             "angular_vel_tracking": 1.0,
             "healthy": 1.0,
-            # ✅ [수정] 큰 걸음 유도를 위해 feet_airtime 보상의 가중치를 대폭 상향합니다.
             "feet_airtime": 5.0, 
+            "recovery": 10.0,  # 회복 행동에 대한 보상 가중치
         }
         self.cost_weights = {
             "torque": 0.0002,
@@ -79,11 +80,11 @@ class Go1MujocoEnv(MujocoEnv):
             "action_rate": 0.01,
             "joint_limit": 10.0,
             "joint_velocity": 0.01,
-            # ✅ [수정] 종종걸음(빠른 발놀림)을 억제하기 위해 가속도 페널티 가중치를 10배 상향합니다.
             "joint_acceleration": 2.0e-4,
             "orientation": 1.0,
             "collision": 1.0,
-            "default_joint_position": 0.1
+            "default_joint_position": 0.1,
+            "unhealthy_state": 5.0, # 불건강 상태 지속에 대한 페널티 가중치
         }
 
         if self.biped:
@@ -96,17 +97,14 @@ class Go1MujocoEnv(MujocoEnv):
             self.cost_weights["biped_front_feet_below_hips"] = 6.0
             self.cost_weights["biped_abduction_joints"] = 0.7
             self.cost_weights["biped_unwanted_contact"] = 150.0
-            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 가중치
             self.cost_weights["self_collision"] = 25.0
-
 
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
         self._default_joint_position = np.array(self.model.key_ctrl[0])
         
-        # 현재는 제자리 걸음 상태이므로, 이 부분은 그대로 둡니다.
-        self._desired_velocity_min = np.array([0.0, -0.0, -0.0])
-        self._desired_velocity_max = np.array([0.0, 0.0, 0.0])
+        self._desired_velocity_min = np.array([-0.5, -0.0, -0.0])
+        self._desired_velocity_max = np.array([0.5, 0.0, 0.0])
         self._desired_velocity = self._sample_desired_vel()
         self._obs_scale = {
             "linear_velocity": 2.0,
@@ -125,6 +123,12 @@ class Go1MujocoEnv(MujocoEnv):
         self._cfrc_ext_feet_indices = [4, 7, 10, 13]
         self._cfrc_ext_front_feet_indices = [4, 7]
         self._cfrc_ext_contact_indices = [2, 3, 5, 6, 8, 9, 11, 12]
+        
+        # ✨ [신규 추가] 요청사항 반영: 불건강 상태 지속 시간 관리 변수
+        self._time_in_unhealthy_state = 0.0
+        self._max_unhealthy_time = 15.0 # 15초 이상 지속 시 종료
+        # ✨ [신규 추가] 요청사항 반영: 회복 보상 계산을 위한 이전 상태 저장 변수
+        self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
 
         dof_position_limit_multiplier = 0.9
         ctrl_range_offset = (
@@ -194,7 +198,6 @@ class Go1MujocoEnv(MujocoEnv):
                 for name in unwanted_contact_body_names
             ]
 
-            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 감지를 위한 body ID 세트
             self._front_right_limb_body_ids = {
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
                 for name in ["FR_hip", "FR_thigh", "FR_calf"]
@@ -399,7 +402,7 @@ class Go1MujocoEnv(MujocoEnv):
         return np.sum(np.square(contact_forces))
 
 
-    def _check_health(self):
+    def _get_health_status(self):
         """로봇의 건강 상태를 확인하고, 종료 시 원인과 상세 정보를 반환합니다."""
         state = self.state_vector()
 
@@ -442,12 +445,9 @@ class Go1MujocoEnv(MujocoEnv):
     def step(self, action):
         self._step += 1
         
-        # ✨ Note: front_contact_in_step 변수는 이제 _check_health에서 처리하므로 삭제해도 무방하나,
-        # 다른 로직(self._front_feet_touched)에 사용되므로 유지합니다.
-        front_contact_in_step = False
+        # biped 모드에서 앞발이 닿았는지 여부를 기록하는 로직은 유지합니다.
         if self.biped:
             if np.any(self.front_feet_contact_forces > 1.0):
-                front_contact_in_step = True
                 self._front_feet_touched = True
 
         self.do_simulation(action, self.frame_skip)
@@ -455,7 +455,18 @@ class Go1MujocoEnv(MujocoEnv):
         observation = self._get_obs()
         reward, reward_info = self._calc_reward(action)
         
-        terminated = not self.is_healthy
+        # --- [✅ 수정] 종료 조건 로직을 완전히 변경합니다. ---
+        is_currently_healthy, reason, details = self._get_health_status()
+
+        if not is_currently_healthy:
+            # 불건강 상태가 지속되면 타이머를 증가시킵니다.
+            self._time_in_unhealthy_state += self.dt
+        else:
+            # 건강한 상태로 돌아오면 타이머를 리셋합니다.
+            self._time_in_unhealthy_state = 0.0
+
+        # 불건강 상태가 _max_unhealthy_time(15초) 이상 지속되면 에피소드를 종료합니다.
+        terminated = self._time_in_unhealthy_state > self._max_unhealthy_time
         truncated = self._step >= (self._max_episode_time_sec / self.dt)
         
         info = {
@@ -467,16 +478,16 @@ class Go1MujocoEnv(MujocoEnv):
             "bipedal_success": False,
             **reward_info,
         }
-
-        # ✨ 수정된 부분: 복잡한 if/elif 블록 대신 _check_health 함수를 직접 호출
+        
         if terminated:
-            is_ok, reason, details = self._check_health()
-            if not is_ok: # health check가 False를 반환했을 경우
-                info["termination_reason"] = reason
-                info["termination_details"] = details
-            else: # 드물지만 is_healthy와 _check_health 사이에 불일치가 발생할 경우를 대비한 방어 코드
-                info["termination_reason"] = "unknown_cause_logic_error"
-                info["termination_details"] = "is_healthy was False, but _check_health returned True."
+            # 타이머에 의해 종료된 경우, 마지막으로 감지된 불건강 원인을 기록합니다.
+            info["termination_reason"] = f"prolonged_{reason}"
+            info["termination_details"] = f"{details} (persisted for > {self._max_unhealthy_time:.2f}s)"
+        elif not is_currently_healthy:
+            # 종료되지는 않았지만 현재 불건강 상태인 경우, 그 상태를 기록하여 디버깅을 돕습니다.
+            info["termination_reason"] = "unhealthy_state_active"
+            info["termination_details"] = details
+        # --- 로직 변경 끝 ---
 
         if truncated and self.biped and not self._front_feet_touched:
             info["bipedal_success"] = True
@@ -488,11 +499,67 @@ class Go1MujocoEnv(MujocoEnv):
             self._last_render_time = self.data.time
 
         self._last_action = action
-        
         self._last_feet_contact_forces = self.feet_contact_forces.copy()
 
         return observation, reward, terminated, truncated, info
 
+    @property
+    def recovery_reward(self):
+        """[✨ 신규 추가] 넘어진 상태에서 다시 일어나려는 행동에 보상을 줍니다.
+
+        로봇이 불건강(unhealthy) 상태일 때, 건강한 상태(정상 높이 및 각도)에
+        얼마나 가까워졌는지를 측정하여 보상을 계산합니다.
+        이전 스텝보다 건강한 범위에 가까워질수록 양의 보상을 받습니다.
+        """
+        is_ok, _, _ = self._get_health_status()
+        
+        state = self.state_vector()
+        z, roll, pitch = state[2], state[4], state[5]
+
+        # 현재 상태가 건강한 범위에서 얼마나 벗어났는지(편차) 계산합니다.
+        z_dev = 0
+        if not (self._healthy_z_range[0] <= z <= self._healthy_z_range[1]):
+            z_dev = min(abs(z - self._healthy_z_range[0]), abs(z - self._healthy_z_range[1]))
+
+        roll_dev = 0
+        if not (self._healthy_roll_range[0] <= roll <= self._healthy_roll_range[1]):
+            roll_dev = min(abs(roll - self._healthy_roll_range[0]), abs(roll - self._healthy_roll_range[1]))
+
+        pitch_dev = 0
+        if not (self._healthy_pitch_range[0] <= pitch <= self._healthy_pitch_range[1]):
+            pitch_dev = min(abs(pitch - self._healthy_pitch_range[0]), abs(pitch - self._healthy_pitch_range[1]))
+        
+        current_deviation = {
+            "z": z_dev,
+            "roll": roll_dev,
+            "pitch": pitch_dev
+        }
+        
+        # 건강하다면 회복 보상은 없으며, 다음 계산을 위해 이전 편차를 0으로 초기화합니다.
+        if is_ok:
+            self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
+            return 0.0
+
+        # 이전 스텝 대비 편차가 얼마나 '감소'했는지(개선되었는지) 계산합니다.
+        z_improvement = self._last_health_deviation["z"] - current_deviation["z"]
+        roll_improvement = self._last_health_deviation["roll"] - current_deviation["roll"]
+        pitch_improvement = self._last_health_deviation["pitch"] - current_deviation["pitch"]
+        
+        # 다음 스텝에서 사용할 수 있도록 현재 편차를 저장합니다.
+        self._last_health_deviation = current_deviation
+
+        # 개선 정도의 합을 보상으로 반환합니다. 값이 양수이면 자세가 나아졌다는 의미입니다.
+        return z_improvement + roll_improvement + pitch_improvement
+
+    @property
+    def unhealthy_state_cost(self):
+        """[✨ 신규 추가] 불건강 상태에 대한 페널티를 계산합니다.
+        
+        로봇이 건강하지 않은 상태(넘어져 있는 등)에 머무를 경우 1.0의 비용을 반환합니다.
+        이를 통해 에이전트는 불건강한 상태를 피하도록 학습합니다.
+        """
+        is_ok, _, _ = self._get_health_status()
+        return 0.0 if is_ok else 1.0
     @property
     def is_healthy(self):
         is_ok, _, _ = self._check_health()
@@ -574,7 +641,8 @@ class Go1MujocoEnv(MujocoEnv):
 
     @property
     def healthy_reward(self):
-        return self.is_healthy
+        is_ok, _, _ = self._get_health_status()
+        return 1.0 if is_ok else 0.0
 
     ######### Negative Reward functions #########
     @property  # TODO: Not used
@@ -680,11 +748,16 @@ class Go1MujocoEnv(MujocoEnv):
         feet_air_time_reward = (
             self.feet_air_time_reward * self.reward_weights["feet_airtime"]
         )
+        
+        # ✨ [신규 추가] 회복 보상을 전체 보상에 추가합니다.
+        recovery_reward = self.recovery_reward * self.reward_weights["recovery"]
+
         rewards = (
             linear_vel_tracking_reward
             + angular_vel_tracking_reward
             + healthy_reward
             + feet_air_time_reward
+            + recovery_reward
         )
 
         # Negative Costs
@@ -711,6 +784,9 @@ class Go1MujocoEnv(MujocoEnv):
             self.default_joint_position_cost
             * self.cost_weights["default_joint_position"]
         )
+        
+        # ✨ [신규 추가] 불건강 상태 비용을 전체 비용에 추가합니다.
+        unhealthy_state_cost = self.unhealthy_state_cost * self.cost_weights["unhealthy_state"]
 
         costs = (
             ctrl_cost
@@ -721,12 +797,15 @@ class Go1MujocoEnv(MujocoEnv):
             + joint_velocity_cost
             + joint_acceleration_cost
             + collision_cost
+            + unhealthy_state_cost
         )
 
         reward_info = {
             "linear_vel_tracking_reward": linear_vel_tracking_reward,
             "reward_ctrl": -ctrl_cost,
             "reward_survive": healthy_reward,
+            "recovery_reward": recovery_reward, # 로그 추가
+            "unhealthy_state_cost": -unhealthy_state_cost, # 로그 추가
         }
 
         if self.biped:
@@ -738,10 +817,7 @@ class Go1MujocoEnv(MujocoEnv):
             front_feet_below_hips_cost = self.biped_front_feet_below_hips_cost * self.cost_weights["biped_front_feet_below_hips"]
             abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
             unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
-            
-            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 계산
             self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
-
 
             rear_feet_airborne_cost = 0.0
             if np.all(self.feet_contact_forces[2:] < 1.0):
@@ -756,10 +832,7 @@ class Go1MujocoEnv(MujocoEnv):
             costs += front_feet_below_hips_cost
             costs += abduction_joints_cost
             costs += unwanted_contact_cost
-            
-            # ✨ [신규 추가] 요청사항 반영: 계산된 페널티를 총 비용에 추가
             costs += self_collision_cost_val
-
 
             reward_info["biped_upright_reward"] = upright_reward
             reward_info["biped_front_contact_cost"] = -front_contact_cost
@@ -770,11 +843,8 @@ class Go1MujocoEnv(MujocoEnv):
             reward_info["biped_front_feet_below_hips_cost"] = -front_feet_below_hips_cost
             reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
             reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
-
-            # ✨ [신규 추가] 요청사항 반영: 자기-충돌 페널티 정보 로깅
             reward_info["self_collision_cost"] = -self_collision_cost_val
-
-        else: # 4족 보행 모드
+        else:
             costs += orientation_cost
             costs += default_joint_position_cost
             reward_info["orientation_cost"] = -orientation_cost
@@ -824,9 +894,6 @@ class Go1MujocoEnv(MujocoEnv):
         if self.biped:
             qpos[7:] = self.BIPEDAL_READY_JOINTS
             qpos[2] = 0.65
-
-            # [✅ 최종 수정] 초기 안정성을 높이기 위해 몸통을 -90도보다 약간 더 앞으로 숙입니다 (-95도).
-            # 이는 로봇이 뒤로 넘어지는 현상을 방지하는 데 도움을 줍니다.
             pitch_angle = np.deg2rad(-95)
             pitch_quaternion = np.array([np.cos(pitch_angle / 2), 0, np.sin(pitch_angle / 2), 0])
             qpos[3:7] = pitch_quaternion
@@ -844,7 +911,6 @@ class Go1MujocoEnv(MujocoEnv):
         self.data.qpos[:] = qpos
         self.data.ctrl[:] = qpos[7:].copy()
 
-        # 걷기 목표를 유지하므로, desired_velocity를 다시 샘플링하도록 둡니다.
         self._desired_velocity = self._sample_desired_vel()
 
         self._step = 0
@@ -854,6 +920,10 @@ class Go1MujocoEnv(MujocoEnv):
         self._last_render_time = -1.0
         self._front_feet_touched = False
         self._last_feet_contact_forces = np.zeros(4)
+        
+        # ✨ [신규 추가] 요청사항 반영: 추가된 상태 변수 초기화
+        self._time_in_unhealthy_state = 0.0
+        self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
 
         observation = self._get_obs()
         return observation

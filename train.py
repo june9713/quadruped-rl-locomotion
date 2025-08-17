@@ -197,7 +197,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video_duration",
         type=int,
-        default=30,
+        default=120,
         help="Duration of the video to record",
     )
     parser.add_argument(
