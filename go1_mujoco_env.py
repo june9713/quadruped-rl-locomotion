@@ -38,10 +38,59 @@ class Go1MujocoEnv(MujocoEnv):
         0.0, 2.8, -1.2,    # RL
     ])
 
-    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, **kwargs):
+    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, enable_disturbances=True, disturbance_power=1.0, **kwargs):
         model_path = Path(f"./unitree_go1/scene_{ctrl_type}.xml")
         self.biped = biped
         self._rand_power = rand_power
+        self.enable_disturbances = enable_disturbances
+        self._disturbance_power = disturbance_power  # 새로 추가된 매개변수
+        
+        # 기본 disturbance_config 정의 (disturbance_power=1.0 기준)
+        base_config = {
+            # 주기적 외란 설정
+            'periodic_push': {
+                'enabled': True,
+                'interval_range': (50, 200),  # 50~200 스텝마다 발생
+                'force_range': (50, 200),      # 50~200N의 힘
+                'duration_range': (3, 10),     # 3~10 스텝 동안 지속
+                'probability': 0.3,            # 30% 확률로 발생
+            },
+            # 다리 걸기 시뮬레이션
+            'leg_sweep': {
+                'enabled': True,
+                'interval_range': (100, 300),
+                'torque_range': (10, 30),      # 관절에 가해지는 토크
+                'duration_range': (2, 5),
+                'probability': 0.2,
+            },
+            # 공중 던지기 시뮬레이션
+            'throw': {
+                'enabled': True,
+                'interval_range': (200, 500),
+                'velocity_range': (2, 5),      # 위쪽 속도 m/s
+                'angular_vel_range': (1, 3),   # 회전 속도 rad/s
+                'probability': 0.1,
+            },
+            # 지속적인 바람/흔들림
+            'continuous_noise': {
+                'enabled': True,
+                'force_std': 5.0,              # 힘의 표준편차
+                'torque_std': 0.5,             # 토크의 표준편차
+            }
+        }
+        
+        # disturbance_power에 따라 설정값들을 조정
+        self.disturbance_config = self._scale_disturbance_config(base_config, self._disturbance_power)
+        
+        # 외란 상태 추적 변수들
+        self._disturbance_step_counter = 0
+        self._next_disturbance_step = 0
+        self._active_disturbance = None
+        self._disturbance_remaining_steps = 0
+        self._disturbance_force = np.zeros(3)
+        self._disturbance_torque = np.zeros(3)
+        self._leg_sweep_joints = []
+        self._leg_sweep_torques = []
 
         MujocoEnv.__init__(
             self,
@@ -90,6 +139,7 @@ class Go1MujocoEnv(MujocoEnv):
 
         if self.biped:
             self.reward_weights["biped_upright"] = 15.0
+            self.reward_weights["head_height"] = 10.0
             self.cost_weights["biped_front_contact"] = 50.0
             self.cost_weights["biped_rear_feet_airborne"] = 5.0
             self.cost_weights["biped_front_foot_height"] = 8.0
@@ -99,6 +149,9 @@ class Go1MujocoEnv(MujocoEnv):
             self.cost_weights["biped_abduction_joints"] = 0.7
             self.cost_weights["biped_unwanted_contact"] = 150.0
             self.cost_weights["self_collision"] = 25.0
+            self.cost_weights["head_low"] = 20.0  # 추가
+            self.cost_weights["inverted_posture"] = 30.0  # 추가
+            self.reward_weights["proper_orientation"] = 12.0  # 새로 추가
 
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
@@ -127,7 +180,7 @@ class Go1MujocoEnv(MujocoEnv):
         
         # ✨ [신규 추가] 요청사항 반영: 불건강 상태 지속 시간 관리 변수
         self._time_in_unhealthy_state = 0.0
-        self._max_unhealthy_time = 15.0 # 15초 이상 지속 시 종료
+        self._max_unhealthy_time = 1.0 # 0.5초 이상 지속 시 종료
         # ✨ [신규 추가] 요청사항 반영: 회복 보상 계산을 위한 이전 상태 저장 변수
         self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
 
@@ -162,9 +215,20 @@ class Go1MujocoEnv(MujocoEnv):
             f: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE.value, f)
             for f in feet_site
         }
+        self._head_site_id = mujoco.mj_name2id(
+        self.model, mujoco.mjtObj.mjOBJ_SITE.value, "head"
+        
+        )
         self._main_body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY.value, "trunk"
         )
+
+        # 힙(엉덩이) 바디 ID는 이족/사족 모드 모두에서 사용하므로 항상 준비합니다.
+        hip_body_names = ["FR_hip", "FL_hip", "RR_hip", "RL_hip"]
+        self._hip_body_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
+            for name in hip_body_names
+        ]
 
         if self.biped:
             front_knee_body_names = ["FR_calf", "FL_calf"]
@@ -181,7 +245,7 @@ class Go1MujocoEnv(MujocoEnv):
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
                 for name in rear_hip_body_names
             ]
-            self._rear_hips_min_height = 0.2
+            self._rear_hips_min_height = 0.4
             
             front_hip_body_names = ["FR_hip", "FL_hip"]
             self._front_hip_body_ids = [
@@ -215,6 +279,60 @@ class Go1MujocoEnv(MujocoEnv):
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY.value, name)
                 for name in ["RL_hip", "RL_thigh", "RL_calf"]
             }
+
+    @property
+    def proper_orientation_reward(self):
+        """올바른 방향(머리가 위, 꼬리가 아래)으로 서있을 때 보상합니다."""
+        # 머리와 꼬리(몸통 뒤쪽) 위치 비교
+        head_pos = self.data.site_xpos[self._head_site_id]
+        trunk_pos = self.data.xpos[self._main_body_id]
+        
+        # 머리의 X 좌표가 몸통보다 앞쪽(양수)에 있어야 함
+        forward_alignment = head_pos[0] - trunk_pos[0]
+        
+        # 머리가 충분히 높고, 앞쪽에 있을 때 보상
+        if head_pos[2] > trunk_pos[2] + 0.1 and forward_alignment > 0:
+            height_bonus = (head_pos[2] - trunk_pos[2]) * 2.0
+            forward_bonus = min(forward_alignment * 3.0, 1.0)
+            return height_bonus + forward_bonus
+        
+        return 0.0
+
+    @property
+    def head_low_cost(self):
+        """머리가 엉덩이보다 낮을 때 페널티를 부과합니다."""
+        head_pos = self.data.site_xpos[self._head_site_id]
+        # 뒷다리 엉덩이들의 평균 높이
+        rear_hips_pos = self.data.xpos[self._rear_hip_body_ids]
+        avg_hip_height = np.mean(rear_hips_pos[:, 2])
+        
+        # 머리가 엉덩이보다 낮으면 그 차이만큼 페널티
+        if head_pos[2] < avg_hip_height:
+            return (avg_hip_height - head_pos[2]) * 10.0
+        return 0.0
+
+
+    @property
+    def inverted_posture_cost(self):
+        """거꾸로 선 자세에 대한 페널티를 부과합니다."""
+        # 몸통의 pitch 각도 확인
+        state = self.state_vector()
+        pitch = state[5]
+        
+        # pitch가 양수면 머리가 아래로 향함 (거꾸로 선 자세)
+        if pitch > 0:
+            return pitch * 20.0
+        return 0.0
+
+    @property
+    def head_height_reward(self):
+        """머리가 높은 위치에 있을 때 보상을 줍니다."""
+        head_pos = self.data.site_xpos[self._head_site_id]
+        
+        # 머리 높이가 0.5m 이상일 때 보상
+        if head_pos[2] > 0.5:
+            return (head_pos[2] - 0.5) * 2.0
+        return 0.0
 
     @property
     def get_up_reward(self):
@@ -386,18 +504,26 @@ class Go1MujocoEnv(MujocoEnv):
 
     @property
     def biped_upright_reward(self):
-        """[✅ 수정] 이족 보행 시 몸통을 수직으로 유지하는 것에 대한 보상 함수입니다.
-        
-        몸통의 전방(X) 축과 월드의 상방(Z) 축이 얼마나 정렬되었는지를 계산합니다.
-        두 벡터의 내적이 1에 가까울수록 완벽하게 서 있는 자세입니다.
-        이전의 잘못된 로직을 완전히 대체합니다.
-        """
+        """이족 보행 시 몸통을 수직으로 유지하는 것에 대한 보상 함수입니다."""
         world_up_vector = np.array([0, 0, 1])
         trunk_forward_vector = self.trunk_forward_axis_in_world
         
-        # 내적 값은 -1과 1 사이이며, 양수일 때만 보상으로 간주합니다.
+        # 머리 방향 확인 - 머리가 아래를 향하면 페널티
+        head_pos = self.data.site_xpos[self._head_site_id]
+        trunk_pos = self.data.xpos[self._main_body_id]
+        
+        # 머리가 몸통보다 낮으면 보상을 0으로
+        if head_pos[2] < trunk_pos[2]:
+            return 0.0
+        
+        # 몸통의 전방 축이 위를 향해야 함
         alignment = np.dot(trunk_forward_vector, world_up_vector)
-        return max(0, alignment)
+        
+        # alignment가 0.7 이상일 때만 보상 (약 45도 이상 서있을 때)
+        if alignment < 0.7:
+            return 0.0
+        
+        return alignment
 
     @property
     def biped_front_foot_height_cost(self):
@@ -457,6 +583,17 @@ class Go1MujocoEnv(MujocoEnv):
             details = f"Pitch: {state[5]:.3f} rad, Healthy Range: [{min_pitch:.2f}, {max_pitch:.2f}] rad"
             return False, "unhealthy_pitch", details
 
+        # 엉덩이(힙) 바디가 바닥(월드 바디: id=0)과 접촉하면 unhealthy로 판정합니다.
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            body1_id = self.model.geom_bodyid[contact.geom1]
+            body2_id = self.model.geom_bodyid[contact.geom2]
+            if (body1_id in self._hip_body_ids and body2_id == 0) or (
+                body2_id in self._hip_body_ids and body1_id == 0
+            ):
+                details = "Hip body contacted the ground (world body)"
+                return False, "hip_contact_with_ground", details
+
         # ✨ [수정] 이족 보행 시 앞발 접촉 종료 조건을 삭제합니다.
         # 이 조건은 이제 _calc_reward 함수에서 패널티로만 처리됩니다.
         if self.biped:
@@ -470,6 +607,133 @@ class Go1MujocoEnv(MujocoEnv):
         # 모든 검사를 통과한 경우
         return True, "not_terminated", "No termination"
 
+
+    def _apply_disturbances(self):
+        """훈련 중 다양한 외란을 적용합니다."""
+        if not self.enable_disturbances:
+            return
+        
+        config = self.disturbance_config
+        
+        # 지속적인 노이즈 적용
+        if config['continuous_noise']['enabled']:
+            noise_force = np.random.normal(0, config['continuous_noise']['force_std'], 3)
+            noise_torque = np.random.normal(0, config['continuous_noise']['torque_std'], 3)
+            self.data.xfrc_applied[self._main_body_id][:3] = noise_force
+            self.data.xfrc_applied[self._main_body_id][3:6] = noise_torque
+        
+        # 현재 활성 외란이 있으면 적용
+        if self._active_disturbance and self._disturbance_remaining_steps > 0:
+            self._apply_active_disturbance()
+            self._disturbance_remaining_steps -= 1
+            if self._disturbance_remaining_steps <= 0:
+                self._clear_active_disturbance()
+        
+        # 새로운 외란 스케줄링
+        self._disturbance_step_counter += 1
+        if self._disturbance_step_counter >= self._next_disturbance_step:
+            self._schedule_new_disturbance()
+
+    def _apply_active_disturbance(self):
+        """현재 활성화된 외란을 적용합니다."""
+        if self._active_disturbance == 'periodic_push':
+            # 몸통에 외력 적용
+            self.data.xfrc_applied[self._main_body_id][:3] = self._disturbance_force
+            self.data.xfrc_applied[self._main_body_id][3:6] = self._disturbance_torque
+            
+        elif self._active_disturbance == 'leg_sweep':
+            # 특정 다리 관절에 토크 적용
+            for joint_idx, torque in zip(self._leg_sweep_joints, self._leg_sweep_torques):
+                self.data.qfrc_applied[6 + joint_idx] = torque
+                
+        elif self._active_disturbance == 'throw':
+            # 초기 속도만 변경 (한 번만 적용)
+            if self._disturbance_remaining_steps == 1:
+                self.data.qvel[:3] += self._disturbance_force
+                self.data.qvel[3:6] += self._disturbance_torque
+
+    def _schedule_new_disturbance(self):
+        """새로운 외란을 스케줄링합니다."""
+        config = self.disturbance_config
+        
+        # 외란 타입 선택 (확률 기반)
+        disturbance_types = []
+        if config['periodic_push']['enabled'] and np.random.random() < config['periodic_push']['probability']:
+            disturbance_types.append('periodic_push')
+        if config['leg_sweep']['enabled'] and np.random.random() < config['leg_sweep']['probability']:
+            disturbance_types.append('leg_sweep')
+        if config['throw']['enabled'] and np.random.random() < config['throw']['probability']:
+            disturbance_types.append('throw')
+        
+        if not disturbance_types:
+            # 외란 없이 다음 체크 시점 설정
+            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(50, 150)
+            return
+        
+        # 랜덤하게 하나 선택
+        self._active_disturbance = np.random.choice(disturbance_types)
+        
+        if self._active_disturbance == 'periodic_push':
+            cfg = config['periodic_push']
+            # 랜덤 방향과 크기의 힘
+            force_magnitude = np.random.uniform(*cfg['force_range'])
+            angle = np.random.uniform(0, 2*np.pi)
+            self._disturbance_force = np.array([
+                force_magnitude * np.cos(angle),
+                force_magnitude * np.sin(angle),
+                np.random.uniform(-force_magnitude*0.3, force_magnitude*0.3)
+            ])
+            # 회전 토크도 추가
+            self._disturbance_torque = np.random.uniform(-10, 10, 3)
+            self._disturbance_remaining_steps = np.random.randint(*cfg['duration_range'])
+            # 다음 외란 시점 설정
+            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
+            
+        elif self._active_disturbance == 'leg_sweep':
+            cfg = config['leg_sweep']
+            # 랜덤하게 1-2개 다리 선택
+            num_legs = np.random.randint(1, 3)
+            self._leg_sweep_joints = np.random.choice(12, num_legs, replace=False).tolist()
+            self._leg_sweep_torques = [
+                np.random.uniform(-cfg['torque_range'][1], cfg['torque_range'][1]) 
+                for _ in range(num_legs)
+            ]
+            self._disturbance_remaining_steps = np.random.randint(*cfg['duration_range'])
+            # 다음 외란 시점 설정
+            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
+            
+        elif self._active_disturbance == 'throw':
+            cfg = config['throw']
+            # 위쪽으로 던지기
+            upward_vel = np.random.uniform(*cfg['velocity_range'])
+            self._disturbance_force = np.array([
+                np.random.uniform(-1, 1),
+                np.random.uniform(-1, 1),
+                upward_vel
+            ])
+            # 회전 추가
+            self._disturbance_torque = np.random.uniform(
+                -cfg['angular_vel_range'][1], 
+                cfg['angular_vel_range'][1], 
+                3
+            )
+            self._disturbance_remaining_steps = 1  # 즉시 적용
+            # 다음 외란 시점 설정
+            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
+
+
+    def _clear_active_disturbance(self):
+        """활성 외란을 초기화합니다."""
+        self._active_disturbance = None
+        self._disturbance_force = np.zeros(3)
+        self._disturbance_torque = np.zeros(3)
+        self._leg_sweep_joints = []
+        self._leg_sweep_torques = []
+        # 적용된 힘 초기화
+        self.data.xfrc_applied[self._main_body_id] = np.zeros(6)
+        for i in range(12):
+            self.data.qfrc_applied[6 + i] = 0
+
     def step(self, action):
         self._step += 1
         
@@ -477,6 +741,8 @@ class Go1MujocoEnv(MujocoEnv):
         if self.biped:
             if np.any(self.front_feet_contact_forces > 1.0):
                 self._front_feet_touched = True
+
+        self._apply_disturbances()
 
         self.do_simulation(action, self.frame_skip)
 
@@ -488,7 +754,10 @@ class Go1MujocoEnv(MujocoEnv):
 
         if not is_currently_healthy:
             # 불건강 상태가 지속되면 타이머를 증가시킵니다.
-            self._time_in_unhealthy_state += self.dt
+            if reason != "unhealthy_z":
+                self._time_in_unhealthy_state += self.dt
+            else:
+                self._time_in_unhealthy_state += self.dt
         else:
             # 건강한 상태로 돌아오면 타이머를 리셋합니다.
             self._time_in_unhealthy_state = 0.0
@@ -641,13 +910,13 @@ class Go1MujocoEnv(MujocoEnv):
         """
         feet_contact_force_mag = self.feet_contact_forces
         curr_contact = feet_contact_force_mag > 1.0
-
-        # --- 이족 보행 시 교차 보상 로직 (기존과 동일) ---
+        
+        # 이족 모드에서는 뒷발(RR, RL)만 보상에 포함하고, 앞발(FR, FL)은 제외합니다.
+        # 비-이족 모드에서는 모든 발을 동일하게 보상에 포함합니다.
         if self.biped:
-            rear_feet_contact = curr_contact[2:]
-            is_alternating = (rear_feet_contact[0] != rear_feet_contact[1])
-            return float(is_alternating)
-        # --- 로직 끝 ---
+            reward_feet_mask = np.array([0.0, 0.0, 1.0, 1.0])
+        else:
+            reward_feet_mask = np.ones(4)
 
         contact_filter = np.logical_or(curr_contact, self._last_contacts)
         self._last_contacts = curr_contact
@@ -658,7 +927,9 @@ class Go1MujocoEnv(MujocoEnv):
         # ✅ [수정] 보상 계산 방식을 선형에서 제곱으로 변경
         # air_time이 0.2를 넘는 구간에 대해서 제곱의 보상을 줍니다.
         time_since_threshold = (self._feet_air_time - 0.2).clip(min=0.0)
-        air_time_reward = np.sum(np.square(time_since_threshold) * first_contact)
+        air_time_reward = np.sum(
+            np.square(time_since_threshold) * first_contact * reward_feet_mask
+        )
         
         # 목표 속도가 매우 낮을 때는 보상을 주지 않는 조건 (기존과 동일)
         air_time_reward *= np.linalg.norm(self._desired_velocity[:2]) > 0.1
@@ -868,6 +1139,8 @@ class Go1MujocoEnv(MujocoEnv):
 
         if self.biped:
             upright_reward = self.biped_upright_reward * self.reward_weights["biped_upright"]
+            head_height_reward = self.head_height_reward * self.reward_weights["head_height"]  # 추가
+            proper_orientation_reward = self.proper_orientation_reward * self.reward_weights["proper_orientation"]  # 새로 추가
             front_contact_cost = self.biped_front_contact_cost * self.cost_weights["biped_front_contact"]
             front_foot_height_cost = self.biped_front_foot_height_cost * self.cost_weights["biped_front_foot_height"]
             crossed_legs_cost = self.biped_crossed_legs_cost * self.cost_weights["biped_crossed_legs"]
@@ -876,12 +1149,19 @@ class Go1MujocoEnv(MujocoEnv):
             abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
             unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
             self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
+            head_low_cost = self.head_low_cost * self.cost_weights["head_low"]  # 추가
+            inverted_posture_cost = self.inverted_posture_cost * self.cost_weights["inverted_posture"]  # 추가
+            
 
             rear_feet_airborne_cost = 0.0
             if np.all(self.feet_contact_forces[2:] < 1.0):
                 rear_feet_airborne_cost = self.cost_weights["biped_rear_feet_airborne"]
 
             rewards += upright_reward
+            rewards += proper_orientation_reward  # 새로 추가
+            rewards += head_height_reward  # 추가
+            costs += head_low_cost  # 추가
+            costs += inverted_posture_cost  # 추가
             costs += front_contact_cost
             costs += rear_feet_airborne_cost
             costs += front_foot_height_cost
@@ -894,6 +1174,7 @@ class Go1MujocoEnv(MujocoEnv):
 
             reward_info["biped_upright_reward"] = upright_reward
             reward_info["biped_front_contact_cost"] = -front_contact_cost
+            reward_info["proper_orientation_reward"] = proper_orientation_reward  # 새로 추가
             reward_info["biped_rear_feet_airborne_cost"] = -rear_feet_airborne_cost
             reward_info["biped_front_foot_height_cost"] = -front_foot_height_cost
             reward_info["biped_crossed_legs_cost"] = -crossed_legs_cost
@@ -902,6 +1183,9 @@ class Go1MujocoEnv(MujocoEnv):
             reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
             reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
             reward_info["self_collision_cost"] = -self_collision_cost_val
+            reward_info["head_height_reward"] = head_height_reward
+            reward_info["head_low_cost"] = -head_low_cost
+            reward_info["inverted_posture_cost"] = -inverted_posture_cost
         else:
             costs += orientation_cost
             costs += default_joint_position_cost
@@ -946,11 +1230,114 @@ class Go1MujocoEnv(MujocoEnv):
 
         return curr_obs
 
+
+    def _scale_disturbance_config(self, base_config, power):
+        """disturbance_power에 따라 외란 설정을 조정하는 함수
+        
+        Args:
+            base_config: 기본 외란 설정 (power=1.0 기준)
+            power: 외란 강도 조절 계수 (0.0~2.0, 기본값 1.0)
+        
+        Returns:
+            조정된 외란 설정 딕셔너리
+        """
+        import copy
+        scaled_config = copy.deepcopy(base_config)
+        
+        # power가 0에 가까우면 모든 외란을 비활성화
+        if power <= 0.1:
+            for disturbance_type in scaled_config:
+                scaled_config[disturbance_type]['enabled'] = False
+            return scaled_config
+        
+        # 각 외란 타입별로 power에 따라 강도 조정
+        for disturbance_type, config in scaled_config.items():
+            if disturbance_type == 'periodic_push':
+                # 힘의 범위를 power에 비례하여 조정
+                original_force = config['force_range']
+                config['force_range'] = (
+                    int(original_force[0] * power),
+                    int(original_force[1] * power)
+                )
+                # 확률도 power에 따라 조정 (최대 확률은 유지)
+                config['probability'] = min(config['probability'] * power, 0.5)
+                
+            elif disturbance_type == 'leg_sweep':
+                # 토크 범위를 power에 비례하여 조정
+                original_torque = config['torque_range']
+                config['torque_range'] = (
+                    int(original_torque[0] * power),
+                    int(original_torque[1] * power)
+                )
+                config['probability'] = min(config['probability'] * power, 0.3)
+                
+            elif disturbance_type == 'throw':
+                # 속도 범위를 power에 비례하여 조정
+                original_vel = config['velocity_range']
+                config['velocity_range'] = (
+                    original_vel[0] * power,
+                    original_vel[1] * power
+                )
+                original_ang_vel = config['angular_vel_range']
+                config['angular_vel_range'] = (
+                    original_ang_vel[0] * power,
+                    original_ang_vel[1] * power
+                )
+                config['probability'] = min(config['probability'] * power, 0.2)
+                
+            elif disturbance_type == 'continuous_noise':
+                # 연속적인 노이즈의 표준편차를 power에 비례하여 조정
+                config['force_std'] = config['force_std'] * power
+                config['torque_std'] = config['torque_std'] * power
+        
+        return scaled_config
+
+    def set_disturbance_power(self, new_power):
+        """실행 중에 외란 강도를 동적으로 조정하는 함수
+        
+        Args:
+            new_power: 새로운 외란 강도 (0.0~2.0)
+        """
+        self._disturbance_power = new_power
+        
+        # 기본 설정을 다시 로드하고 새로운 power로 스케일링
+        base_config = {
+            'periodic_push': {
+                'enabled': True,
+                'interval_range': (50, 200),
+                'force_range': (50, 200),
+                'duration_range': (3, 10),
+                'probability': 0.3,
+            },
+            'leg_sweep': {
+                'enabled': True,
+                'interval_range': (100, 300),
+                'torque_range': (10, 30),
+                'duration_range': (2, 5),
+                'probability': 0.2,
+            },
+            'throw': {
+                'enabled': True,
+                'interval_range': (200, 500),
+                'velocity_range': (2, 5),
+                'angular_vel_range': (1, 3),
+                'probability': 0.1,
+            },
+            'continuous_noise': {
+                'enabled': True,
+                'force_std': 5.0,
+                'torque_std': 0.5,
+            }
+        }
+        
+        self.disturbance_config = self._scale_disturbance_config(base_config, new_power)
+        #print(f"🌪️ 외란 강도가 {new_power:.2f}로 조정되었습니다.")
+
     def reset_model(self):
         qpos = self.model.key_qpos[0].copy()
 
         # ✨ [수정] 20% 확률로 넘어진 상태에서 시작하는 커리큘럼 학습 적용
-        if np.random.rand() < 0.2:
+        if np.random.rand() < 0.000:
             # 옆으로 또는 뒤로 누운 자세를 만듭니다.
             # Roll 또는 Pitch 각도를 크게 주어 눕힙니다.
             random_angle = np.random.uniform(np.pi / 2.1, np.pi / 1.5) # 85~120도 사이
@@ -967,7 +1354,8 @@ class Go1MujocoEnv(MujocoEnv):
         elif self.biped:
             qpos[7:] = self.BIPEDAL_READY_JOINTS
             qpos[2] = 0.65
-            pitch_angle = np.deg2rad(-95)
+            # pitch를 -95도에서 -85도로 수정 (더 수직에 가깝게)
+            pitch_angle = np.deg2rad(-85)  
             pitch_quaternion = np.array([np.cos(pitch_angle / 2), 0, np.sin(pitch_angle / 2), 0])
             qpos[3:7] = pitch_quaternion
 
@@ -996,6 +1384,15 @@ class Go1MujocoEnv(MujocoEnv):
         
         self._time_in_unhealthy_state = 0.0
         self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
+
+        self._disturbance_step_counter = 0
+        self._next_disturbance_step = np.random.randint(20, 100)  # 첫 외란까지 대기 시간
+        self._active_disturbance = None
+        self._disturbance_remaining_steps = 0
+        self._disturbance_force = np.zeros(3)
+        self._disturbance_torque = np.zeros(3)
+        self._leg_sweep_joints = []
+        self._leg_sweep_torques = []
 
         observation = self._get_obs()
         return observation

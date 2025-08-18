@@ -13,7 +13,7 @@ from tqdm import tqdm
 from stable_baselines3.common.callbacks import CallbackList
 from training_callback import VideoRecordingCallback # VisualTrainingCallback import 추가
 from training_callback import VideoRecordingCallback, EnhancedVisualCallback
-
+from training_callback import CurriculumCallback, DisturbanceCurriculumCallback
 # ✨ --- 수정된 부분 시작 --- ✨
 # Tcl/Tk 오류를 방지하기 위해 GUI 백엔드 대신 Agg 백엔드를 사용하도록 설정합니다.
 # 이 코드는 matplotlib.pyplot을 import하기 전에 실행되어야 합니다.
@@ -43,7 +43,12 @@ LOG_DIR = "logs"
 def train(args):
     vec_env = make_vec_env(
         Go1MujocoEnv,
-        env_kwargs={"ctrl_type": args.ctrl_type, "biped": args.biped, "rand_power": args.rand_power},
+        env_kwargs={
+            "ctrl_type": args.ctrl_type, 
+            "biped": args.biped, 
+            "rand_power": args.rand_power,
+            "disturbance_power": args.disturbance_power  # 새로 추가된 인자
+        },
         n_envs=args.num_parallel_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
@@ -58,6 +63,7 @@ def train(args):
         width=1024,
         height=768,
         rand_power=args.rand_power,
+        disturbance_power=args.disturbance_power,  # 새로 추가된 인자
     )
 
     train_time = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -100,13 +106,24 @@ def train(args):
         show_duration_seconds=args.video_duration
     )
     
-    from training_callback import CurriculumCallback
+    
     curriculum_callback = CurriculumCallback(
         total_timesteps=args.total_timesteps,
         initial_rand_power=args.rand_power
     )
+    
+    # ✨ [신규 추가] 외란 커리큘럼 콜백
+    disturbance_curriculum_callback = DisturbanceCurriculumCallback(
+        total_timesteps=args.total_timesteps,
+        max_disturbance_power=args.disturbance_power
+    )
 
-    callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback])
+    callback_list = CallbackList([
+        enhanced_callback, 
+        video_callback, 
+        curriculum_callback,
+        disturbance_curriculum_callback  # 새로 추가된 콜백
+    ])
 
     # ✨ [수정] PPO 모델을 불러오거나 생성할 때 learning_rate 인자 추가
     if args.model_path is not None:
@@ -197,7 +214,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video_duration",
         type=int,
-        default=120,
+        default=30,
         help="Duration of the video to record",
     )
     parser.add_argument(
@@ -219,6 +236,13 @@ if __name__ == "__main__":
         type=float,
         default=3e-4,  # PPO의 기본값
         help="The learning rate for the PPO optimizer.",
+    )
+
+    parser.add_argument(
+        "--disturbance_power",
+        type=float,
+        default=1.0,
+        help="Strength of environmental disturbances (0.0=disabled, 1.0=normal, 2.0=strong). Controls the intensity of pushes, leg sweeps, throws, and noise.",
     )
 
     parser.add_argument("--seed", type=int, default=0)

@@ -52,19 +52,132 @@ class CurriculumCallback(BaseCallback):
 
         if current_step < self.curriculum_end_step:
             # 70% 지점에 도달할 때까지 rand_power를 선형적으로 감소시킵니다.
-            # 진행률 (0.0 ~ 1.0) 계산
             progress = current_step / self.curriculum_end_step
             new_rand_power = self.initial_rand_power * (1.0 - progress)
         else:
             # 70% 지점을 넘어서면 rand_power를 0으로 고정합니다.
             new_rand_power = 0.0
 
-        # 모든 병렬 환경에 새로운 rand_power 값을 설정합니다.
-        # Go1MujocoEnv 클래스 내부에서는 '_rand_power'라는 이름의 속성을 사용합니다.
-        self.training_env.set_attr("_rand_power", new_rand_power)
+        # ✨ [완전한 해결책] 경고 없이 올바르게 접근하는 방법
+        try:
+            # VecEnv의 각 환경에 직접 접근하여 설정
+            for i in range(self.training_env.num_envs):
+                # get_attr을 사용하여 unwrapped 환경에 접근
+                env_unwrapped = self.training_env.get_attr("unwrapped", indices=[i])[0]
+                env_unwrapped._rand_power = new_rand_power
+                        
+        except Exception as e:
+            # 만약 위 방법이 실패하면 기존 방식 사용 (하지만 경고 억제)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.training_env.set_attr("_rand_power", new_rand_power)
 
         # rand_power 값의 변화를 TensorBoard에 로깅합니다.
         self.logger.record("curriculum/rand_power", new_rand_power)
+        
+        return True
+
+
+class DisturbanceCurriculumCallback(BaseCallback):
+    """
+    학습 진행률에 따라 환경의 'disturbance_power'를 조절하는 커리큘럼 콜백입니다.
+
+    이 콜백은 학습 시작 시 disturbance_power를 0에서 시작하여,
+    전체 학습 timesteps의 30% 지점에 도달할 때까지 선형적으로 증가시키고,
+    30% 이후부터는 사용자가 지정한 최대값을 유지합니다.
+    """
+    def __init__(self, total_timesteps: int, max_disturbance_power: float, verbose: int = 0):
+        """
+        DisturbanceCurriculumCallback 인스턴스를 초기화합니다.
+
+        :param total_timesteps: 모델 학습에 사용될 총 타임스텝 수.
+        :param max_disturbance_power: 학습 중 적용할 최대 외란 강도.
+        :param verbose: 상세 정보 출력 레벨.
+        """
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.max_disturbance_power = max_disturbance_power
+        # 커리큘럼이 최대값에 도달하는 시점 (전체 학습의 30%)
+        self.disturbance_ramp_up_end = int(total_timesteps * 0.3)
+        self._last_logged_disturbance_power = -1.0
+
+    def _on_step(self) -> bool:
+        """
+        학습의 매 스텝마다 호출되어 disturbance_power를 동적으로 조절합니다.
+        """
+        current_step = self.num_timesteps
+
+        if True:#current_step < self.disturbance_ramp_up_end:
+            # 30% 지점에 도달할 때까지 disturbance_power를 0에서 최대값까지 선형적으로 증가시킵니다.
+            progress = current_step / self.disturbance_ramp_up_end
+            new_disturbance_power = self.max_disturbance_power #* progress
+        else:
+            # 30% 지점을 넘어서면 disturbance_power를 최대값으로 고정합니다.
+            new_disturbance_power = self.max_disturbance_power
+
+        # ✨ [완전한 해결책] 경고 없이 올바르게 접근하는 방법
+        try:
+            # VecEnv의 각 환경에 직접 접근하여 설정
+            for i in range(self.training_env.num_envs):
+                # get_attr을 사용하여 unwrapped 환경에 접근
+                env_unwrapped = self.training_env.get_attr("unwrapped", indices=[i])[0]
+                
+                # set_disturbance_power 메소드가 있는지 확인하고 호출
+                if hasattr(env_unwrapped, 'set_disturbance_power'):
+                    env_unwrapped.set_disturbance_power(new_disturbance_power)
+                else:
+                    # 메소드가 없으면 직접 속성 설정
+                    env_unwrapped._disturbance_power = new_disturbance_power
+                    
+                    # disturbance_config도 업데이트
+                    if hasattr(env_unwrapped, '_scale_disturbance_config'):
+                        base_config = {
+                            'periodic_push': {
+                                'enabled': True,
+                                'interval_range': (50, 200),
+                                'force_range': (50, 200),
+                                'duration_range': (3, 10),
+                                'probability': 0.3,
+                            },
+                            'leg_sweep': {
+                                'enabled': True,
+                                'interval_range': (100, 300),
+                                'torque_range': (10, 30),
+                                'duration_range': (2, 5),
+                                'probability': 0.2,
+                            },
+                            'throw': {
+                                'enabled': True,
+                                'interval_range': (200, 500),
+                                'velocity_range': (2, 5),
+                                'angular_vel_range': (1, 3),
+                                'probability': 0.1,
+                            },
+                            'continuous_noise': {
+                                'enabled': True,
+                                'force_std': 5.0,
+                                'torque_std': 0.5,
+                            }
+                        }
+                        env_unwrapped.disturbance_config = env_unwrapped._scale_disturbance_config(base_config, new_disturbance_power)
+                        
+        except Exception as e:
+            # 만약 위 방법이 실패하면 기존 방식 사용 (하지만 경고 억제)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.training_env.set_attr("_disturbance_power", new_disturbance_power)
+
+        # disturbance_power 값의 변화를 TensorBoard에 로깅합니다.
+        self.logger.record("curriculum/disturbance_power", new_disturbance_power)
+        
+        # 로그 출력 (10% 단위로만 출력하여 스팸 방지)
+        rounded_power = round(new_disturbance_power, 1)
+        if abs(rounded_power - self._last_logged_disturbance_power) >= 0.1:
+            progress_percent = (current_step / self.total_timesteps) * 100
+            print(f"🌪️ 외란 강도 조정: {rounded_power:.1f} (진행률: {progress_percent:.1f}%)")
+            self._last_logged_disturbance_power = rounded_power
         
         return True
 
@@ -534,7 +647,7 @@ class EnhancedVisualCallback(VisualTrainingCallback):
         
         if self.use_curriculum and hasattr(self.eval_env, 'standing_reward'):
             self.curriculum_stages.append(self.eval_env.standing_reward.curriculum_stage)
-   
+  
     def _update_enhanced_plots(self):
         """실시간으로 학습 진행 상황 그래프를 이미지 파일로 저장합니다."""
         if len(self.rewards_history) < 2:
@@ -588,8 +701,8 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             for i in range(len(corr.columns)):
                 for j in range(len(corr.columns)):
                     plt.text(j, i, f'{corr.iloc[i, j]:.2f}', 
-                           ha='center', va='center',
-                           color='white' if abs(corr.iloc[i, j]) > 0.5 else 'black')
+                            ha='center', va='center',
+                            color='white' if abs(corr.iloc[i, j]) > 0.5 else 'black')
             
             plt.tight_layout()
             plt.savefig(f"{save_path}/component_correlation.png", dpi=300)
@@ -607,10 +720,10 @@ class EnhancedVisualCallback(VisualTrainingCallback):
             plt.subplot(2, 1, 1)
             for stage, rates in stage_success.items():
                 plt.bar(stage, np.mean(rates), alpha=0.7, 
-                       label=f'Stage {stage}')
+                        label=f'Stage {stage}')
             plt.xlabel('커리큘럼 단계')
             plt.ylabel('평균 성공률')
-            plt.title('커리큘큘럼 단계별 성공률')
+            plt.title('커리큘럼 단계별 성공률')
             plt.legend()
             
             plt.subplot(2, 1, 2)
@@ -671,7 +784,7 @@ class VideoRecordingCallback(BaseCallback):
             print("⚠️ 비디오 저장이 비활성화됩니다.")
         
         print(f"🎥 비디오 녹화 설정: {show_duration_seconds}초간 녹화")
-    
+
     # 파일명: training_callback.py -> 클래스명: VideoRecordingCallback
 
     def _on_step(self) -> bool:
@@ -682,7 +795,7 @@ class VideoRecordingCallback(BaseCallback):
             self._record_video()
             self.last_record_timestep = self.num_timesteps
         return True
-    
+
     def _record_video(self):
         """원하는 길이의 비디오를 정확히 녹화하도록 수정한 함수"""
         print(f"\n🎥 비디오 녹화 중... (Timestep: {self.num_timesteps:,})")
