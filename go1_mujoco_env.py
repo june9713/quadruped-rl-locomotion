@@ -38,59 +38,10 @@ class Go1MujocoEnv(MujocoEnv):
         0.0, 2.8, -1.2,    # RL
     ])
 
-    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, enable_disturbances=True, disturbance_power=1.0, **kwargs):
+    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, **kwargs):
         model_path = Path(f"./unitree_go1/scene_{ctrl_type}.xml")
         self.biped = biped
         self._rand_power = rand_power
-        self.enable_disturbances = enable_disturbances
-        self._disturbance_power = disturbance_power  # 새로 추가된 매개변수
-        
-        # 기본 disturbance_config 정의 (disturbance_power=1.0 기준)
-        base_config = {
-            # 주기적 외란 설정
-            'periodic_push': {
-                'enabled': True,
-                'interval_range': (50, 200),  # 50~200 스텝마다 발생
-                'force_range': (50, 200),      # 50~200N의 힘
-                'duration_range': (3, 10),     # 3~10 스텝 동안 지속
-                'probability': 0.3,            # 30% 확률로 발생
-            },
-            # 다리 걸기 시뮬레이션
-            'leg_sweep': {
-                'enabled': True,
-                'interval_range': (100, 300),
-                'torque_range': (10, 30),      # 관절에 가해지는 토크
-                'duration_range': (2, 5),
-                'probability': 0.2,
-            },
-            # 공중 던지기 시뮬레이션
-            'throw': {
-                'enabled': True,
-                'interval_range': (200, 500),
-                'velocity_range': (2, 5),      # 위쪽 속도 m/s
-                'angular_vel_range': (1, 3),   # 회전 속도 rad/s
-                'probability': 0.1,
-            },
-            # 지속적인 바람/흔들림
-            'continuous_noise': {
-                'enabled': True,
-                'force_std': 5.0,              # 힘의 표준편차
-                'torque_std': 0.5,             # 토크의 표준편차
-            }
-        }
-        
-        # disturbance_power에 따라 설정값들을 조정
-        self.disturbance_config = self._scale_disturbance_config(base_config, self._disturbance_power)
-        
-        # 외란 상태 추적 변수들
-        self._disturbance_step_counter = 0
-        self._next_disturbance_step = 0
-        self._active_disturbance = None
-        self._disturbance_remaining_steps = 0
-        self._disturbance_force = np.zeros(3)
-        self._disturbance_torque = np.zeros(3)
-        self._leg_sweep_joints = []
-        self._leg_sweep_torques = []
 
         MujocoEnv.__init__(
             self,
@@ -607,133 +558,6 @@ class Go1MujocoEnv(MujocoEnv):
         # 모든 검사를 통과한 경우
         return True, "not_terminated", "No termination"
 
-
-    def _apply_disturbances(self):
-        """훈련 중 다양한 외란을 적용합니다."""
-        if not self.enable_disturbances:
-            return
-        
-        config = self.disturbance_config
-        
-        # 지속적인 노이즈 적용
-        if config['continuous_noise']['enabled']:
-            noise_force = np.random.normal(0, config['continuous_noise']['force_std'], 3)
-            noise_torque = np.random.normal(0, config['continuous_noise']['torque_std'], 3)
-            self.data.xfrc_applied[self._main_body_id][:3] = noise_force
-            self.data.xfrc_applied[self._main_body_id][3:6] = noise_torque
-        
-        # 현재 활성 외란이 있으면 적용
-        if self._active_disturbance and self._disturbance_remaining_steps > 0:
-            self._apply_active_disturbance()
-            self._disturbance_remaining_steps -= 1
-            if self._disturbance_remaining_steps <= 0:
-                self._clear_active_disturbance()
-        
-        # 새로운 외란 스케줄링
-        self._disturbance_step_counter += 1
-        if self._disturbance_step_counter >= self._next_disturbance_step:
-            self._schedule_new_disturbance()
-
-    def _apply_active_disturbance(self):
-        """현재 활성화된 외란을 적용합니다."""
-        if self._active_disturbance == 'periodic_push':
-            # 몸통에 외력 적용
-            self.data.xfrc_applied[self._main_body_id][:3] = self._disturbance_force
-            self.data.xfrc_applied[self._main_body_id][3:6] = self._disturbance_torque
-            
-        elif self._active_disturbance == 'leg_sweep':
-            # 특정 다리 관절에 토크 적용
-            for joint_idx, torque in zip(self._leg_sweep_joints, self._leg_sweep_torques):
-                self.data.qfrc_applied[6 + joint_idx] = torque
-                
-        elif self._active_disturbance == 'throw':
-            # 초기 속도만 변경 (한 번만 적용)
-            if self._disturbance_remaining_steps == 1:
-                self.data.qvel[:3] += self._disturbance_force
-                self.data.qvel[3:6] += self._disturbance_torque
-
-    def _schedule_new_disturbance(self):
-        """새로운 외란을 스케줄링합니다."""
-        config = self.disturbance_config
-        
-        # 외란 타입 선택 (확률 기반)
-        disturbance_types = []
-        if config['periodic_push']['enabled'] and np.random.random() < config['periodic_push']['probability']:
-            disturbance_types.append('periodic_push')
-        if config['leg_sweep']['enabled'] and np.random.random() < config['leg_sweep']['probability']:
-            disturbance_types.append('leg_sweep')
-        if config['throw']['enabled'] and np.random.random() < config['throw']['probability']:
-            disturbance_types.append('throw')
-        
-        if not disturbance_types:
-            # 외란 없이 다음 체크 시점 설정
-            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(50, 150)
-            return
-        
-        # 랜덤하게 하나 선택
-        self._active_disturbance = np.random.choice(disturbance_types)
-        
-        if self._active_disturbance == 'periodic_push':
-            cfg = config['periodic_push']
-            # 랜덤 방향과 크기의 힘
-            force_magnitude = np.random.uniform(*cfg['force_range'])
-            angle = np.random.uniform(0, 2*np.pi)
-            self._disturbance_force = np.array([
-                force_magnitude * np.cos(angle),
-                force_magnitude * np.sin(angle),
-                np.random.uniform(-force_magnitude*0.3, force_magnitude*0.3)
-            ])
-            # 회전 토크도 추가
-            self._disturbance_torque = np.random.uniform(-10, 10, 3)
-            self._disturbance_remaining_steps = np.random.randint(*cfg['duration_range'])
-            # 다음 외란 시점 설정
-            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
-            
-        elif self._active_disturbance == 'leg_sweep':
-            cfg = config['leg_sweep']
-            # 랜덤하게 1-2개 다리 선택
-            num_legs = np.random.randint(1, 3)
-            self._leg_sweep_joints = np.random.choice(12, num_legs, replace=False).tolist()
-            self._leg_sweep_torques = [
-                np.random.uniform(-cfg['torque_range'][1], cfg['torque_range'][1]) 
-                for _ in range(num_legs)
-            ]
-            self._disturbance_remaining_steps = np.random.randint(*cfg['duration_range'])
-            # 다음 외란 시점 설정
-            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
-            
-        elif self._active_disturbance == 'throw':
-            cfg = config['throw']
-            # 위쪽으로 던지기
-            upward_vel = np.random.uniform(*cfg['velocity_range'])
-            self._disturbance_force = np.array([
-                np.random.uniform(-1, 1),
-                np.random.uniform(-1, 1),
-                upward_vel
-            ])
-            # 회전 추가
-            self._disturbance_torque = np.random.uniform(
-                -cfg['angular_vel_range'][1], 
-                cfg['angular_vel_range'][1], 
-                3
-            )
-            self._disturbance_remaining_steps = 1  # 즉시 적용
-            # 다음 외란 시점 설정
-            self._next_disturbance_step = self._disturbance_step_counter + np.random.randint(*cfg['interval_range'])
-
-
-    def _clear_active_disturbance(self):
-        """활성 외란을 초기화합니다."""
-        self._active_disturbance = None
-        self._disturbance_force = np.zeros(3)
-        self._disturbance_torque = np.zeros(3)
-        self._leg_sweep_joints = []
-        self._leg_sweep_torques = []
-        # 적용된 힘 초기화
-        self.data.xfrc_applied[self._main_body_id] = np.zeros(6)
-        for i in range(12):
-            self.data.qfrc_applied[6 + i] = 0
-
     def step(self, action):
         self._step += 1
         
@@ -741,8 +565,6 @@ class Go1MujocoEnv(MujocoEnv):
         if self.biped:
             if np.any(self.front_feet_contact_forces > 1.0):
                 self._front_feet_touched = True
-
-        self._apply_disturbances()
 
         self.do_simulation(action, self.frame_skip)
 
@@ -1230,109 +1052,6 @@ class Go1MujocoEnv(MujocoEnv):
 
         return curr_obs
 
-
-    def _scale_disturbance_config(self, base_config, power):
-        """disturbance_power에 따라 외란 설정을 조정하는 함수
-        
-        Args:
-            base_config: 기본 외란 설정 (power=1.0 기준)
-            power: 외란 강도 조절 계수 (0.0~2.0, 기본값 1.0)
-        
-        Returns:
-            조정된 외란 설정 딕셔너리
-        """
-        import copy
-        scaled_config = copy.deepcopy(base_config)
-        
-        # power가 0에 가까우면 모든 외란을 비활성화
-        if power <= 0.1:
-            for disturbance_type in scaled_config:
-                scaled_config[disturbance_type]['enabled'] = False
-            return scaled_config
-        
-        # 각 외란 타입별로 power에 따라 강도 조정
-        for disturbance_type, config in scaled_config.items():
-            if disturbance_type == 'periodic_push':
-                # 힘의 범위를 power에 비례하여 조정
-                original_force = config['force_range']
-                config['force_range'] = (
-                    int(original_force[0] * power),
-                    int(original_force[1] * power)
-                )
-                # 확률도 power에 따라 조정 (최대 확률은 유지)
-                config['probability'] = min(config['probability'] * power, 0.5)
-                
-            elif disturbance_type == 'leg_sweep':
-                # 토크 범위를 power에 비례하여 조정
-                original_torque = config['torque_range']
-                config['torque_range'] = (
-                    int(original_torque[0] * power),
-                    int(original_torque[1] * power)
-                )
-                config['probability'] = min(config['probability'] * power, 0.3)
-                
-            elif disturbance_type == 'throw':
-                # 속도 범위를 power에 비례하여 조정
-                original_vel = config['velocity_range']
-                config['velocity_range'] = (
-                    original_vel[0] * power,
-                    original_vel[1] * power
-                )
-                original_ang_vel = config['angular_vel_range']
-                config['angular_vel_range'] = (
-                    original_ang_vel[0] * power,
-                    original_ang_vel[1] * power
-                )
-                config['probability'] = min(config['probability'] * power, 0.2)
-                
-            elif disturbance_type == 'continuous_noise':
-                # 연속적인 노이즈의 표준편차를 power에 비례하여 조정
-                config['force_std'] = config['force_std'] * power
-                config['torque_std'] = config['torque_std'] * power
-        
-        return scaled_config
-
-    def set_disturbance_power(self, new_power):
-        """실행 중에 외란 강도를 동적으로 조정하는 함수
-        
-        Args:
-            new_power: 새로운 외란 강도 (0.0~2.0)
-        """
-        self._disturbance_power = new_power
-        
-        # 기본 설정을 다시 로드하고 새로운 power로 스케일링
-        base_config = {
-            'periodic_push': {
-                'enabled': True,
-                'interval_range': (50, 200),
-                'force_range': (50, 200),
-                'duration_range': (3, 10),
-                'probability': 0.3,
-            },
-            'leg_sweep': {
-                'enabled': True,
-                'interval_range': (100, 300),
-                'torque_range': (10, 30),
-                'duration_range': (2, 5),
-                'probability': 0.2,
-            },
-            'throw': {
-                'enabled': True,
-                'interval_range': (200, 500),
-                'velocity_range': (2, 5),
-                'angular_vel_range': (1, 3),
-                'probability': 0.1,
-            },
-            'continuous_noise': {
-                'enabled': True,
-                'force_std': 5.0,
-                'torque_std': 0.5,
-            }
-        }
-        
-        self.disturbance_config = self._scale_disturbance_config(base_config, new_power)
-        #print(f"🌪️ 외란 강도가 {new_power:.2f}로 조정되었습니다.")
-
     def reset_model(self):
         qpos = self.model.key_qpos[0].copy()
 
@@ -1384,15 +1103,6 @@ class Go1MujocoEnv(MujocoEnv):
         
         self._time_in_unhealthy_state = 0.0
         self._last_health_deviation = {"z": 0.0, "roll": 0.0, "pitch": 0.0}
-
-        self._disturbance_step_counter = 0
-        self._next_disturbance_step = np.random.randint(20, 100)  # 첫 외란까지 대기 시간
-        self._active_disturbance = None
-        self._disturbance_remaining_steps = 0
-        self._disturbance_force = np.zeros(3)
-        self._disturbance_torque = np.zeros(3)
-        self._leg_sweep_joints = []
-        self._leg_sweep_torques = []
 
         observation = self._get_obs()
         return observation
