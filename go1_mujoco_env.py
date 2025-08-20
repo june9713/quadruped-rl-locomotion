@@ -1056,7 +1056,7 @@ class Go1MujocoEnv(MujocoEnv):
         qpos = self.model.key_qpos[0].copy()
 
         # ✨ [수정] 20% 확률로 넘어진 상태에서 시작하는 커리큘럼 학습 적용
-        if np.random.rand() < 0.000:
+        if False:#np.random.rand() < 0.000:
             # 옆으로 또는 뒤로 누운 자세를 만듭니다.
             # Roll 또는 Pitch 각도를 크게 주어 눕힙니다.
             random_angle = np.random.uniform(np.pi / 2.1, np.pi / 1.5) # 85~120도 사이
