@@ -171,3 +171,4 @@ cython_debug/
 #.idea/
 checkpoints/
 checkpoints/
+training_progress.png
