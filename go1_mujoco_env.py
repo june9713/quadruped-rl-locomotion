@@ -1,9 +1,11 @@
+#4족보행 로봇을 이용한 실험적 2족보행 훈련 코드드
 from gymnasium import spaces
 from gymnasium.envs.mujoco import MujocoEnv
 import mujoco
 import numpy as np
 from pathlib import Path
 import time
+import random
 
 DEFAULT_CAMERA_CONFIG = {
     "azimuth": 90.0,
@@ -85,22 +87,21 @@ class Go1MujocoEnv(MujocoEnv):
             "flipped_over": 150.0,  #  1. 뒤집힘 비용 가중치 추가 
         }
         
-        if self.biped:
-            self.reward_weights["biped_upright"] = 20.0
-            self.cost_weights["biped_front_contact"] = 80.0
-            self.cost_weights["biped_rear_feet_airborne"] = 3.0
-            self.cost_weights["biped_front_foot_height"] = 6.0
-            self.cost_weights["biped_crossed_legs"] = 4.0
-            self.cost_weights["biped_low_rear_hips"] = 7.0
-            self.cost_weights["biped_front_feet_below_hips"] = 80.0
-            self.cost_weights["biped_abduction_joints"] = 0.5
-            self.cost_weights["biped_unwanted_contact"] = 120.0
-            self.cost_weights["self_collision"] = 20.0
-            self.cost_weights["biped_body_height"] = 4.0
-            self.cost_weights["biped_roll_stability"] = 6.0
-            self.cost_weights["biped_pitch_stability"] = 8.0
-            self.cost_weights["shoulder_below_pelvis"] = 100.0  # 4. 어깨가 골반보다 낮을 때 큰 감점
-            self.cost_weights["hip_ground_contact"] = 200.0  # 5. hip이 땅에 닿을 때 매우 큰 감점
+        self.reward_weights["biped_upright"] = 20.0
+        self.cost_weights["biped_front_contact"] = 80.0
+        self.cost_weights["biped_rear_feet_airborne"] = 3.0
+        self.cost_weights["biped_front_foot_height"] = 6.0
+        self.cost_weights["biped_crossed_legs"] = 4.0
+        self.cost_weights["biped_low_rear_hips"] = 7.0
+        self.cost_weights["biped_front_feet_below_hips"] = 80.0
+        self.cost_weights["biped_abduction_joints"] = 0.5
+        self.cost_weights["biped_unwanted_contact"] = 120.0
+        self.cost_weights["self_collision"] = 20.0
+        self.cost_weights["biped_body_height"] = 4.0
+        self.cost_weights["biped_roll_stability"] = 6.0
+        self.cost_weights["biped_pitch_stability"] = 8.0
+        self.cost_weights["shoulder_below_pelvis"] = 100.0  # 4. 어깨가 골반보다 낮을 때 큰 감점
+        self.cost_weights["hip_ground_contact"] = 200.0  # 5. hip이 땅에 닿을 때 매우 큰 감점
             
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
@@ -157,8 +158,8 @@ class Go1MujocoEnv(MujocoEnv):
             self.model, mujoco.mjtObj.mjOBJ_BODY.value, "trunk"
         )
         
-        if self.biped:
-            self._initialize_biped_body_ids()
+
+        self._initialize_biped_body_ids()
 
         self._time_flipped_over = 0.0 #  2. 뒤집힘 타이머 변수 추가
         self._time_shoulder_below_pelvis = 0.0  # 3. 어깨가 골반보다 낮은 상태 지속 시간
@@ -547,10 +548,9 @@ class Go1MujocoEnv(MujocoEnv):
         # ✨ --- 수정된 부분 끝 --- ✨
 
         front_contact_in_step = False
-        if self.biped:
-            if np.any(self.front_feet_contact_forces > 1.0):
-                front_contact_in_step = True
-                self._front_feet_touched = True
+        if np.any(self.front_feet_contact_forces > 1.0):
+            front_contact_in_step = True
+            self._front_feet_touched = True
         
         self.do_simulation(action, self.frame_skip)
         
@@ -654,10 +654,10 @@ class Go1MujocoEnv(MujocoEnv):
         feet_contact_force_mag = self.feet_contact_forces
         curr_contact = feet_contact_force_mag > 1.0
         
-        if self.biped:
-            rear_feet_contact = curr_contact[2:]
-            is_alternating = (rear_feet_contact[0] != rear_feet_contact[1])
-            return float(is_alternating)
+
+        rear_feet_contact = curr_contact[2:]
+        is_alternating = (rear_feet_contact[0] != rear_feet_contact[1])
+        return float(is_alternating)
         
         contact_filter = np.logical_or(curr_contact, self._last_contacts)
         self._last_contacts = curr_contact
@@ -723,19 +723,19 @@ class Go1MujocoEnv(MujocoEnv):
         costs = 0
         reward_info = {}
         
-        if self.biped:
-            upright_reward = self.biped_perfect_upright_reward * self.reward_weights["biped_perfect_upright"]
-            forward_vel_reward = self.forward_velocity_reward * self.reward_weights["forward_velocity"]
-            balance_reward = self.balance_stability_reward * self.reward_weights["balance_stability"]
-            front_feet_off_reward = self.biped_front_feet_off_ground_reward * self.reward_weights["biped_front_feet_off_ground"]
-            biped_upright_reward = self.biped_upright_reward * self.reward_weights["biped_upright"]
-            
-            rewards += upright_reward + forward_vel_reward + balance_reward + front_feet_off_reward + biped_upright_reward
-            
-            reward_info["biped_upright_reward"] = upright_reward
-            reward_info["forward_velocity_reward"] = forward_vel_reward
-            reward_info["balance_stability_reward"] = balance_reward
-            reward_info["front_feet_off_ground_reward"] = front_feet_off_reward
+
+        upright_reward = self.biped_perfect_upright_reward * self.reward_weights["biped_perfect_upright"]
+        forward_vel_reward = self.forward_velocity_reward * self.reward_weights["forward_velocity"]
+        balance_reward = self.balance_stability_reward * self.reward_weights["balance_stability"]
+        front_feet_off_reward = self.biped_front_feet_off_ground_reward * self.reward_weights["biped_front_feet_off_ground"]
+        biped_upright_reward = self.biped_upright_reward * self.reward_weights["biped_upright"]
+        
+        rewards += upright_reward + forward_vel_reward + balance_reward + front_feet_off_reward + biped_upright_reward
+        
+        reward_info["biped_upright_reward"] = upright_reward
+        reward_info["forward_velocity_reward"] = forward_vel_reward
+        reward_info["balance_stability_reward"] = balance_reward
+        reward_info["front_feet_off_ground_reward"] = front_feet_off_reward
         
         linear_vel_tracking_reward = self.linear_velocity_tracking_reward * self.reward_weights["linear_vel_tracking"]
         angular_vel_tracking_reward = self.angular_velocity_tracking_reward * self.reward_weights["angular_vel_tracking"]
@@ -773,57 +773,53 @@ class Go1MujocoEnv(MujocoEnv):
             collision_cost + flipped_cost #  뒤집힘 비용 합산 
         )
         
-        if self.biped:
-            biped_cost_scale = 0.5 + 0.5 * self.curriculum_factor
-            
-            front_contact_cost = self.biped_front_contact_cost * self.cost_weights["biped_front_contact"] * biped_cost_scale
-            rear_feet_airborne_cost = 0.0
-            if np.all(self.feet_contact_forces[2:] < 1.0):
-                rear_feet_airborne_cost = self.cost_weights["biped_rear_feet_airborne"]
-            front_foot_height_cost = self.biped_front_foot_height_cost * self.cost_weights["biped_front_foot_height"]
-            crossed_legs_cost = self.biped_crossed_legs_cost * self.cost_weights["biped_crossed_legs"] * biped_cost_scale
-            low_rear_hips_cost = self.biped_low_rear_hips_cost * self.cost_weights["biped_low_rear_hips"] * biped_cost_scale
-            front_feet_below_hips_cost = self.biped_front_feet_below_hips_cost * self.cost_weights["biped_front_feet_below_hips"]
-            abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
-            unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
-            self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
-            body_height_cost = self.biped_body_height_cost * self.cost_weights["biped_body_height"]
-            roll_stability_cost = self.biped_roll_stability_cost * self.cost_weights["biped_roll_stability"]
-            pitch_stability_cost = self.biped_pitch_stability_cost * self.cost_weights["biped_pitch_stability"]
-            
-            # 7. 어깨-골반 높이 비용 추가
-            shoulder_below_pelvis_cost = self.shoulder_below_pelvis_cost * self.cost_weights["shoulder_below_pelvis"]
-            
-            # 8. hip ground contact 비용 추가
-            hip_ground_contact_cost = self.hip_ground_contact_cost * self.cost_weights["hip_ground_contact"]
-            
-            costs += (
-                front_contact_cost + rear_feet_airborne_cost + front_foot_height_cost +
-                crossed_legs_cost + low_rear_hips_cost + front_feet_below_hips_cost +
-                abduction_joints_cost + unwanted_contact_cost + self_collision_cost_val +
-                body_height_cost + roll_stability_cost + pitch_stability_cost +
-                shoulder_below_pelvis_cost + hip_ground_contact_cost
-            )
-            
-            reward_info["biped_front_contact_cost"] = -front_contact_cost
-            reward_info["biped_rear_feet_airborne_cost"] = -rear_feet_airborne_cost
-            reward_info["biped_front_foot_height_cost"] = -front_foot_height_cost
-            reward_info["biped_crossed_legs_cost"] = -crossed_legs_cost
-            reward_info["biped_low_rear_hips_cost"] = -low_rear_hips_cost
-            reward_info["biped_front_feet_below_hips_cost"] = -front_feet_below_hips_cost
-            reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
-            reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
-            reward_info["self_collision_cost"] = -self_collision_cost_val
-            reward_info["biped_body_height_cost"] = -body_height_cost
-            reward_info["biped_roll_stability_cost"] = -roll_stability_cost
-            reward_info["biped_pitch_stability_cost"] = -pitch_stability_cost
-            reward_info["shoulder_below_pelvis_cost"] = -shoulder_below_pelvis_cost
-            reward_info["hip_ground_contact_cost"] = -hip_ground_contact_cost
-        else:
-            costs += orientation_cost + default_joint_position_cost
-            reward_info["orientation_cost"] = -orientation_cost
-            reward_info["default_joint_position_cost"] = -default_joint_position_cost
+
+        biped_cost_scale = 0.5 + 0.5 * self.curriculum_factor
         
+        front_contact_cost = self.biped_front_contact_cost * self.cost_weights["biped_front_contact"] * biped_cost_scale
+        rear_feet_airborne_cost = 0.0
+        if np.all(self.feet_contact_forces[2:] < 1.0):
+            rear_feet_airborne_cost = self.cost_weights["biped_rear_feet_airborne"]
+        front_foot_height_cost = self.biped_front_foot_height_cost * self.cost_weights["biped_front_foot_height"]
+        crossed_legs_cost = self.biped_crossed_legs_cost * self.cost_weights["biped_crossed_legs"] * biped_cost_scale
+        low_rear_hips_cost = self.biped_low_rear_hips_cost * self.cost_weights["biped_low_rear_hips"] * biped_cost_scale
+        front_feet_below_hips_cost = self.biped_front_feet_below_hips_cost * self.cost_weights["biped_front_feet_below_hips"]
+        abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
+        unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
+        self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
+        body_height_cost = self.biped_body_height_cost * self.cost_weights["biped_body_height"]
+        roll_stability_cost = self.biped_roll_stability_cost * self.cost_weights["biped_roll_stability"]
+        pitch_stability_cost = self.biped_pitch_stability_cost * self.cost_weights["biped_pitch_stability"]
+        
+        # 7. 어깨-골반 높이 비용 추가
+        shoulder_below_pelvis_cost = self.shoulder_below_pelvis_cost * self.cost_weights["shoulder_below_pelvis"]
+        
+        # 8. hip ground contact 비용 추가
+        hip_ground_contact_cost = self.hip_ground_contact_cost * self.cost_weights["hip_ground_contact"]
+        
+        costs += (
+            front_contact_cost + rear_feet_airborne_cost + front_foot_height_cost +
+            crossed_legs_cost + low_rear_hips_cost + front_feet_below_hips_cost +
+            abduction_joints_cost + unwanted_contact_cost + self_collision_cost_val +
+            body_height_cost + roll_stability_cost + pitch_stability_cost +
+            shoulder_below_pelvis_cost + hip_ground_contact_cost
+        )
+        
+        reward_info["biped_front_contact_cost"] = -front_contact_cost
+        reward_info["biped_rear_feet_airborne_cost"] = -rear_feet_airborne_cost
+        reward_info["biped_front_foot_height_cost"] = -front_foot_height_cost
+        reward_info["biped_crossed_legs_cost"] = -crossed_legs_cost
+        reward_info["biped_low_rear_hips_cost"] = -low_rear_hips_cost
+        reward_info["biped_front_feet_below_hips_cost"] = -front_feet_below_hips_cost
+        reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
+        reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
+        reward_info["self_collision_cost"] = -self_collision_cost_val
+        reward_info["biped_body_height_cost"] = -body_height_cost
+        reward_info["biped_roll_stability_cost"] = -roll_stability_cost
+        reward_info["biped_pitch_stability_cost"] = -pitch_stability_cost
+        reward_info["shoulder_below_pelvis_cost"] = -shoulder_below_pelvis_cost
+        reward_info["hip_ground_contact_cost"] = -hip_ground_contact_cost
+
         reward_info["reward_ctrl"] = -ctrl_cost
         
         reward = rewards - costs
@@ -861,7 +857,7 @@ class Go1MujocoEnv(MujocoEnv):
     def reset_model(self):
         qpos = self.model.key_qpos[0].copy()
         
-        if self.biped:
+        if random.random() < 0.5:
             qpos[7:] = self.BIPEDAL_READY_JOINTS
             qpos[2] = 0.60
             
@@ -888,11 +884,9 @@ class Go1MujocoEnv(MujocoEnv):
         self.data.qpos[:] = qpos
         self.data.ctrl[:] = qpos[7:].copy()
         
-        if self.biped:
-            vel_scale = min(1.0, 0.3 + 0.7 * self.curriculum_factor)
-            self._desired_velocity = np.array([0.2 * vel_scale, 0, 0])
-        else:
-            self._desired_velocity = self._sample_desired_vel()
+   
+        vel_scale = min(1.0, 0.3 + 0.7 * self.curriculum_factor)
+        self._desired_velocity = np.array([0.2 * vel_scale, 0, 0])
         
         self._step = 0
         self._last_action = np.zeros(12)
@@ -1010,7 +1004,7 @@ class Go1MujocoEnv(MujocoEnv):
             # 발 접촉 정보
             contact_info = {
                 'feet_contact_forces': self.feet_contact_forces.tolist(),
-                'front_feet_contact_forces': self.front_feet_contact_forces.tolist() if self.biped else None,
+                'front_feet_contact_forces': self.front_feet_contact_forces.tolist(),
                 'feet_air_time': self._feet_air_time.tolist(),
                 'last_contacts': self._last_contacts.tolist(),
             }
