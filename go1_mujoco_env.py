@@ -387,7 +387,7 @@ class Go1MujocoEnv(MujocoEnv):
     def biped_body_height_cost(self):
         z_pos = self.data.qpos[2]
         if z_pos < self._healthy_z_range[0]:
-            penalty = np.exp((self._healthy_z_range[0] - z_pos) * 10) - 1
+            penalty = np.exp((self._healthy_z_range[0] - z_pos) * 30) - 1
             return penalty
         return 0.0
         
@@ -531,8 +531,8 @@ class Go1MujocoEnv(MujocoEnv):
             return False, "hip_ground_contact_timeout", f"Hip on ground for {self._time_hip_on_ground:.2f}s > 1.0s"
         
         # 몸통 높이가 낮을 때 타이머가 1초 이상 지속되면 에피소드 종료
-        if self._time_trunk_low > 0.3:
-            return False, "trunk_low_timeout", f"Trunk height low for {self._time_trunk_low:.2f}s > 1.0s"
+        if self._time_trunk_low > 0.36:
+            return False, "trunk_low_timeout", f"Trunk height low for {self._time_trunk_low:.2f}s > 0.4s"
         
         
 
