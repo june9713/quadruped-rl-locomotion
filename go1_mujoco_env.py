@@ -1,4 +1,4 @@
-#4족보행 로봇을 이용한 실험적 2족보행 훈련 코드드
+# 4족보행 로봇을 이용한 실험적 2족보행 훈련 코드드
 from gymnasium import spaces
 from gymnasium.envs.mujoco import MujocoEnv
 import mujoco
@@ -36,8 +36,10 @@ class Go1MujocoEnv(MujocoEnv):
         self.biped = biped
         self._rand_power = rand_power
         
+        # 노이즈 추가
         self._action_noise_scale = action_noise
         self._time_since_last_noise = 0.0
+        # 노이즈 추가
 
         MujocoEnv.__init__(
             self,
@@ -60,65 +62,46 @@ class Go1MujocoEnv(MujocoEnv):
         self._episode_count = 0
         self._success_count = 0
         
-        # ==========================================
-        # 정규화된 보상 가중치 (최대: 10.0)
-        # ==========================================
         self.reward_weights = {
-            # 핵심 목표 (7-10 범위)
-            "biped_perfect_upright": 10.0,       # 최우선: 완벽한 직립 자세
-            "balance_stability": 8.0,            # 균형 안정성
-            "biped_front_feet_off_ground": 8.0,  # 앞발 들기 (핵심!)
-            "forward_velocity": 7.0,             # 전진 속도
-            
-            # 보조 목표 (3-5 범위)
-            "biped_upright": 5.0,                # 몸통 직립 정렬
-            "feet_airtime": 4.0,                 # 발 체공 시간
-            
-            # 기본 보상 (0.5-2 범위)
-            "linear_vel_tracking": 1.0,          # 선속도 추적
-            "angular_vel_tracking": 0.8,         # 각속도 추적
-            "healthy": 0.5,                      # 생존 보상
+            "linear_vel_tracking": 2.0,
+            "angular_vel_tracking": 1.0,
+            "healthy": 1.0,
+            "feet_airtime": 5.0,
+            "biped_front_feet_off_ground": 40.0,
+            "biped_perfect_upright": 60.0,
+            "forward_velocity": 25.0,
+            "balance_stability": 20.0,
         }
         
-        # ==========================================
-        # 정규화된 비용 가중치 (최대: 10.0, 최소: 0.01)
-        # ==========================================
         self.cost_weights = {
-            # 레벨 1: 치명적 실패 (8-10 범위)
-            "flipped_over": 10.0,                # 뒤집힘 - 최대 페널티
-            "hip_ground_contact": 9.0,           # hip이 땅에 닿음
-            "shoulder_below_pelvis": 8.0,        # 어깨가 골반보다 낮음
-            
-            # 레벨 2: 주요 실패 (4-7 범위)
-            "biped_unwanted_contact": 6.0,       # 원치 않는 접촉
-            "biped_front_feet_below_hips": 5.0,  # 앞발이 엉덩이보다 낮음
-            "biped_front_contact": 4.0,          # 앞발 접촉 (기존 80에서 대폭 감소)
-            "joint_limit": 4.0,                  # 관절 한계
-            
-            # 레벨 3: 자세 제약 (1-3 범위)
-            "self_collision": 3.0,               # 자가 충돌
-            "biped_pitch_stability": 2.0,        # 피치 안정성
-            "biped_roll_stability": 2.0,         # 롤 안정성
-            "biped_low_rear_hips": 1.5,         # 낮은 뒷다리 엉덩이
-            "biped_body_height": 1.5,           # 몸체 높이
-            "collision": 1.0,                    # 일반 충돌
-            
-            # 레벨 4: 부드러운 동작 (0.1-0.9 범위)
-            "biped_front_foot_height": 0.8,      # 앞발 높이
-            "biped_crossed_legs": 0.6,          # 다리 교차
-            "biped_rear_feet_airborne": 0.5,    # 뒷발 체공
-            "vertical_vel": 0.4,                # 수직 속도
-            "orientation": 0.3,                  # 방향
-            
-            # 레벨 5: 미세 조정 (0.01-0.09 범위)
-            "biped_abduction_joints": 0.08,     # 외전 관절
-            "xy_angular_vel": 0.05,             # XY 각속도
-            "default_joint_position": 0.05,     # 기본 관절 위치
-            "joint_velocity": 0.03,             # 관절 속도
-            "action_rate": 0.02,                # 액션 변화율
-            "torque": 0.01,                     # 토크 (최소값)
-            "joint_acceleration": 0.01,         # 관절 가속도 (최소값)
+            "torque": 0.0001,
+            "vertical_vel": 1.5,
+            "xy_angular_vel": 0.03,
+            "action_rate": 0.005,
+            "joint_limit": 8.0,
+            "joint_velocity": 0.005,
+            "joint_acceleration": 1.0e-4,
+            "orientation": 1.0,
+            "collision": 1.0,
+            "default_joint_position": 0.05,
+            "flipped_over": 150.0,  # 몸통 뒤집힘 비용
         }
+        
+        self.reward_weights["biped_upright"] = 20.0
+        self.cost_weights["biped_front_contact"] = 80.0
+        self.cost_weights["biped_rear_feet_airborne"] = 3.0
+        self.cost_weights["biped_front_foot_height"] = 6.0
+        self.cost_weights["biped_crossed_legs"] = 4.0
+        self.cost_weights["biped_low_rear_hips"] = 7.0
+        self.cost_weights["biped_front_feet_below_hips"] = 80.0
+        self.cost_weights["biped_abduction_joints"] = 0.5
+        self.cost_weights["biped_unwanted_contact"] = 120.0
+        self.cost_weights["self_collision"] = 20.0
+        self.cost_weights["biped_body_height"] = 4.0
+        self.cost_weights["biped_roll_stability"] = 6.0
+        self.cost_weights["biped_pitch_stability"] = 8.0
+        self.cost_weights["shoulder_below_pelvis"] = 100.0  # 어깨가 골반보다 낮을 때 비용
+        self.cost_weights["hip_ground_contact"] = 200.0  # hip이 땅에 닿을 때 비용
             
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
@@ -175,81 +158,12 @@ class Go1MujocoEnv(MujocoEnv):
             self.model, mujoco.mjtObj.mjOBJ_BODY.value, "trunk"
         )
         
+
         self._initialize_biped_body_ids()
 
-        self._time_flipped_over = 0.0
-        self._time_shoulder_below_pelvis = 0.0
-        self._time_hip_on_ground = 0.0
-        
-        # ==========================================
-        # 보상 정규화를 위한 추가 변수
-        # ==========================================
-        self._reward_normalizer_window = 1000
-        self._reward_history = []
-        self._cost_history = []
-        
-        # 스케일 검증 출력
-        self._validate_weight_scales()
-
-    def _validate_weight_scales(self):
-        """가중치 스케일 범위를 검증하고 출력합니다."""
-        max_reward = max(self.reward_weights.values())
-        min_reward = min(self.reward_weights.values())
-        max_cost = max(self.cost_weights.values())
-        min_cost = min(self.cost_weights.values())
-        
-        print("=" * 50)
-        print("📊 보상/비용 가중치 스케일 분석")
-        print("=" * 50)
-        print(f"✅ 보상 범위: {min_reward:.2f} ~ {max_reward:.2f} (비율 {max_reward/min_reward:.1f}:1)")
-        print(f"✅ 비용 범위: {min_cost:.2f} ~ {max_cost:.2f} (비율 {max_cost/min_cost:.1f}:1)")
-        print(f"✅ 전체 동적 범위: {max_reward/min_cost:.0f}:1")
-        print("=" * 50)
-        
-        # 경고 체크
-        if max_reward > 10.0:
-            print("⚠️ 경고: 최대 보상이 10.0을 초과합니다!")
-        if min_cost < 0.01:
-            print("⚠️ 경고: 최소 비용이 0.01 미만입니다!")
-        if max_reward/min_cost > 1000:
-            print("⚠️ 경고: 동적 범위가 1000:1을 초과합니다!")
-
-    def _apply_curriculum_scaling(self, weight_dict):
-        """커리큘럼 학습 진행도에 따라 가중치를 동적으로 조정합니다."""
-        scaled_weights = weight_dict.copy()
-        curriculum = self.curriculum_factor
-        
-        if curriculum < 0.3:  # 초기 단계: 안정성 중심
-            stability_keys = ["balance_stability", "biped_perfect_upright", "flipped_over", "hip_ground_contact"]
-            for key in stability_keys:
-                if key in scaled_weights:
-                    scaled_weights[key] *= 1.3
-                    
-        elif curriculum < 0.7:  # 중간 단계: 동작 학습
-            motion_keys = ["biped_front_feet_off_ground", "forward_velocity", "biped_front_contact"]
-            for key in motion_keys:
-                if key in scaled_weights:
-                    if "contact" in key:  # 접촉 페널티는 감소
-                        scaled_weights[key] *= 0.7
-                    else:  # 동작 보상은 증가
-                        scaled_weights[key] *= 1.2
-                        
-        else:  # 후기 단계: 성능 최적화
-            performance_keys = ["forward_velocity", "feet_airtime", "torque", "action_rate"]
-            for key in performance_keys:
-                if key in scaled_weights:
-                    if key in ["torque", "action_rate"]:  # 효율성 페널티 감소
-                        scaled_weights[key] *= 0.5
-                    else:  # 성능 보상 증가
-                        scaled_weights[key] *= 1.3
-        
-        return scaled_weights
-
-    def _normalize_reward_value(self, value, max_val=10.0):
-        """보상 값을 정규화합니다 (tanh 기반 부드러운 포화)."""
-        if abs(value) < 0.001:
-            return 0.0
-        return np.tanh(value / max_val) * max_val
+        self._time_flipped_over = 0.0 # 몸통 뒤집힘 타이머
+        self._time_shoulder_below_pelvis = 0.0  # 어깨가 골반보다 낮을 때 타이머
+        self._time_hip_on_ground = 0.0  # hip이 땅에 닿을 때 타이머
     
     def _initialize_biped_body_ids(self):
         front_knee_body_names = ["FR_calf", "FL_calf"]
@@ -309,14 +223,14 @@ class Go1MujocoEnv(MujocoEnv):
     def _trunk_up_alignment(self):
         """Helper to get alignment of trunk's z-axis with world's up-axis."""
         world_up_vector = np.array([0, 0, 1])
-        # 몸통 회전 행렬의 3번째 열이 몸통의 Z축(Up 벡터)을 월드 좌표계 기준으로 나타냅니다.
+        # 몸통의 z-축이 월드의 up-축과 얼마나 정렬되어 있는지 계산합니다.
         trunk_up_vector = self.data.xmat[self._main_body_id].reshape(3, 3)[:, 2]
         return np.dot(trunk_up_vector, world_up_vector)
 
     @property
     def is_flipped_over(self):
         """Check if the robot is flipped over."""
-        # 몸통의 Up 벡터와 세상의 Up 벡터의 내적 값이 음수이면 뒤집힌 상태입니다.
+        # 몸통의 z-축이 월드의 up-축과 얼마나 정렬되어 있는지 계산합니다.
         return self._trunk_up_alignment < 0.0
 
     @property
@@ -324,8 +238,8 @@ class Go1MujocoEnv(MujocoEnv):
         """Calculate cost for being flipped over."""
         alignment = self._trunk_up_alignment
         if alignment < 0:
-            # 뒤집혔을 때, alignment 값은 0 ~ -1 사이입니다.
-            # 제곱을 하여 -1에 가까울수록 (완전히 뒤집힐수록) 비용이 1에 가깝게 증가합니다.
+            # 몸통이 뒤집힌 경우, alignment는 0에서 -1 사이의 값을 가집니다.
+            # 몸통이 뒤집힌 경우, alignment는 0에서 -1 사이의 값을 가집니다.
             return np.square(alignment)
         return 0.0
 
@@ -505,7 +419,7 @@ class Go1MujocoEnv(MujocoEnv):
     
     @property
     def shoulder_below_pelvis_cost(self):
-        """어깨가 골반보다 낮을 때의 비용을 계산합니다."""
+        """어깨가 골반보다 낮은 경우 비용을 계산합니다."""
         if not self.biped:
             return 0.0
         
@@ -541,12 +455,12 @@ class Go1MujocoEnv(MujocoEnv):
     
     @property
     def is_hip_on_ground(self):
-        """hip이 땅에 닿는지 확인합니다."""
-        # 모든 hip body들의 접촉 힘을 확인
+        """hip이 땅에 닿을 때 확인합니다."""
+        # hip body의 위치를 확인합니다.
         all_hip_body_ids = self._front_hip_body_ids + self._rear_hip_body_ids
         hip_contact_forces = self.data.cfrc_ext[all_hip_body_ids]
         
-        # 접촉 힘의 크기가 임계값(0.1)을 초과하면 땅에 닿은 것으로 판단
+        # hip이 땅에 닿을 때의 임계값
         contact_threshold = 0.1
         return np.any(np.linalg.norm(hip_contact_forces, axis=1) > contact_threshold)
     
@@ -556,18 +470,18 @@ class Go1MujocoEnv(MujocoEnv):
         if not self.is_hip_on_ground:
             return 0.0
         
-        # hip이 땅에 닿은 경우, 접촉 힘의 크기에 비례하여 비용 계산
+        # hip이 땅에 닿을 때의 임계값
         all_hip_body_ids = self._front_hip_body_ids + self._rear_hip_body_ids
         hip_contact_forces = self.data.cfrc_ext[all_hip_body_ids]
         
-        # 접촉 힘의 크기를 계산하고 제곱하여 비용 증가
+        # hip이 땅에 닿을 때의 비용을 계산합니다.
         contact_magnitudes = np.linalg.norm(hip_contact_forces, axis=1)
         active_contacts = contact_magnitudes > 0.1
         
         if not np.any(active_contacts):
             return 0.0
         
-        # 활성 접촉에 대해서만 비용 계산
+        # hip이 땅에 닿을 때의 비용을 계산합니다.
         active_contact_forces = contact_magnitudes[active_contacts]
         cost = np.sum(np.square(active_contact_forces))
         
@@ -597,15 +511,15 @@ class Go1MujocoEnv(MujocoEnv):
         if not np.isfinite(state).all():
             return False, "state_not_finite", f"State values are not finite: {state}"
         
-        # 뒤집힌 상태가 1초 이상 지속되면 에피소드 종료 
+        # 몸통이 뒤집힌 경우 타이머가 1초 이상 지속되면 에피소드 종료
         if self._time_flipped_over > 1.0:
             return False, "flipped_over_timeout", f"Flipped over for {self._time_flipped_over:.2f}s > 1.0s"
         
-        # 6. 어깨가 골반보다 낮은 상태가 1초 이상 지속되면 에피소드 종료
+        # 어깨가 골반보다 낮은 경우 타이머가 1초 이상 지속되면 에피소드 종료
         if self._time_shoulder_below_pelvis > 1.0:
             return False, "shoulder_below_pelvis_timeout", f"Shoulder below pelvis for {self._time_shoulder_below_pelvis:.2f}s > 1.0s"
         
-        # 7. hip이 땅에 닿은 상태가 1초 이상 지속되면 에피소드 종료
+        # hip이 땅에 닿을 때 타이머가 1초 이상 지속되면 에피소드 종료
         if self._time_hip_on_ground > 1.0:
             return False, "hip_ground_contact_timeout", f"Hip on ground for {self._time_hip_on_ground:.2f}s > 1.0s"
         
@@ -614,24 +528,24 @@ class Go1MujocoEnv(MujocoEnv):
     def step(self, action):
         self._step += 1
         
-        #if self.curriculum_factor < 0.3:
-         #   action = 0.7 * self._last_action + 0.3 * action
+        if self.curriculum_factor < 0.3:
+            action = 0.7 * self._last_action + 0.3 * action
         
-        # ✨ --- 수정된 부분 시작 --- ✨
-        # 0.5초마다 커리큘럼에 따라 강도가 조절된 노이즈를 action에 추가합니다.
+        # 노이즈 추가
+        # 0.5초마다 노이즈 추가
         self._time_since_last_noise += self.dt
         if self._time_since_last_noise > 0.5:#True:#self._action_noise_scale > 0.0 and self._time_since_last_noise > 0.5:
-            # 커리큘럼에 따라 현재 노이즈 레벨을 계산합니다.
+            # 노이즈 추가
             #print("noise added")
             current_noise_level = self._action_noise_scale * self.curriculum_factor
-            # 노이즈를 생성하고 action에 더합니다.
+            # action에 노이즈 추가
             noise = np.random.normal(0, current_noise_level, size=action.shape)
             action = action + noise 
-            # action 값이 유효 범위 [-1, 1]을 벗어나지 않도록 클리핑합니다.
+            # action 값을 [-1, 1] 범위로 제한
             #action = np.clip(action, -1.0, 1.0)
-            # 타이머를 리셋합니다.
+            # 노이즈 추가 타이머 초기화
             self._time_since_last_noise = 0.0
-        # ✨ --- 수정된 부분 끝 --- ✨
+        # 노이즈 추가
 
         front_contact_in_step = False
         if np.any(self.front_feet_contact_forces > 1.0):
@@ -640,19 +554,19 @@ class Go1MujocoEnv(MujocoEnv):
         
         self.do_simulation(action, self.frame_skip)
         
-        #  매 스텝마다 뒤집힘 상태를 확인하고 타이머 업데이트 
+        # 몸통이 뒤집힌 경우 타이머 증가
         if self.is_flipped_over:
             self._time_flipped_over += self.dt
         else:
             self._time_flipped_over = 0.0
         
-        # 5. 매 스텝마다 어깨-골반 높이 상태를 확인하고 타이머 업데이트
+        # 어깨가 골반보다 낮은 경우 타이머 증가
         if self.is_shoulder_below_pelvis:
             self._time_shoulder_below_pelvis += self.dt
         else:
             self._time_shoulder_below_pelvis = 0.0
         
-        # 6. 매 스텝마다 hip 접촉 상태를 확인하고 타이머 업데이트
+        # hip이 땅에 닿을 때 타이머 증가
         if self.is_hip_on_ground:
             self._time_hip_on_ground += self.dt
         else:
@@ -661,7 +575,7 @@ class Go1MujocoEnv(MujocoEnv):
         observation = self._get_obs()
         reward, reward_info = self._calc_reward(action)
         
-        # ✨ [신규 추가] 실시간 저장을 위한 보상 정보 업데이트
+        # 보상 계산
         self._current_episode_reward = getattr(self, '_current_episode_reward', 0.0) + reward
         self._current_episode_length = getattr(self, '_current_episode_length', 0) + 1
         
@@ -805,215 +719,116 @@ class Go1MujocoEnv(MujocoEnv):
         return np.sum(np.square(self.data.qpos[7:] - self._default_joint_position))
     
     def _calc_reward(self, action):
-        """개선된 보상 계산 함수 (정규화된 스케일 적용)"""
         rewards = 0
         costs = 0
         reward_info = {}
         
-        # 커리큘럼 기반 가중치 조정
-        adjusted_reward_weights = self._apply_curriculum_scaling(self.reward_weights)
-        adjusted_cost_weights = self._apply_curriculum_scaling(self.cost_weights)
+
+        upright_reward = self.biped_perfect_upright_reward * self.reward_weights["biped_perfect_upright"]
+        forward_vel_reward = self.forward_velocity_reward * self.reward_weights["forward_velocity"]
+        balance_reward = self.balance_stability_reward * self.reward_weights["balance_stability"]
+        front_feet_off_reward = self.biped_front_feet_off_ground_reward * self.reward_weights["biped_front_feet_off_ground"]
+        biped_upright_reward = self.biped_upright_reward * self.reward_weights["biped_upright"]
         
-        # ==========================================
-        # 보상 계산 (정규화 적용)
-        # ==========================================
+        rewards += upright_reward + forward_vel_reward + balance_reward + front_feet_off_reward + biped_upright_reward
         
-        # 핵심 보상들
-        upright_raw = self.biped_perfect_upright_reward
-        upright_reward = self._normalize_reward_value(
-            upright_raw * adjusted_reward_weights["biped_perfect_upright"], 10.0
-        )
-        
-        forward_vel_raw = self.forward_velocity_reward
-        forward_vel_reward = self._normalize_reward_value(
-            forward_vel_raw * adjusted_reward_weights["forward_velocity"], 10.0
-        )
-        
-        balance_raw = self.balance_stability_reward
-        balance_reward = self._normalize_reward_value(
-            balance_raw * adjusted_reward_weights["balance_stability"], 10.0
-        )
-        
-        front_feet_off_raw = self.biped_front_feet_off_ground_reward
-        front_feet_off_reward = self._normalize_reward_value(
-            front_feet_off_raw * adjusted_reward_weights["biped_front_feet_off_ground"], 10.0
-        )
-        
-        biped_upright_raw = self.biped_upright_reward
-        biped_upright_reward = self._normalize_reward_value(
-            biped_upright_raw * adjusted_reward_weights["biped_upright"], 10.0
-        )
-        
-        # 보조 보상들
-        linear_vel_tracking_reward = self._normalize_reward_value(
-            self.linear_velocity_tracking_reward * adjusted_reward_weights["linear_vel_tracking"], 10.0
-        )
-        angular_vel_tracking_reward = self._normalize_reward_value(
-            self.angular_velocity_tracking_reward * adjusted_reward_weights["angular_vel_tracking"], 10.0
-        )
-        healthy_reward = self._normalize_reward_value(
-            self.healthy_reward * adjusted_reward_weights["healthy"], 10.0
-        )
-        feet_air_reward = self._normalize_reward_value(
-            self.feet_air_time_reward * adjusted_reward_weights["feet_airtime"], 10.0
-        )
-        
-        # 총 보상 합산
-        rewards = (upright_reward + forward_vel_reward + balance_reward + 
-                front_feet_off_reward + biped_upright_reward + linear_vel_tracking_reward + 
-                angular_vel_tracking_reward + healthy_reward + feet_air_reward)
-        
-        # 보상 정보 저장
         reward_info["biped_upright_reward"] = upright_reward
         reward_info["forward_velocity_reward"] = forward_vel_reward
         reward_info["balance_stability_reward"] = balance_reward
         reward_info["front_feet_off_ground_reward"] = front_feet_off_reward
+        
+        linear_vel_tracking_reward = self.linear_velocity_tracking_reward * self.reward_weights["linear_vel_tracking"]
+        angular_vel_tracking_reward = self.angular_velocity_tracking_reward * self.reward_weights["angular_vel_tracking"]
+        healthy_reward = self.healthy_reward * self.reward_weights["healthy"]
+        feet_air_reward = self.feet_air_time_reward * self.reward_weights["feet_airtime"]
+        
+        rewards += linear_vel_tracking_reward + angular_vel_tracking_reward + healthy_reward + feet_air_reward
+        
         reward_info["linear_vel_tracking_reward"] = linear_vel_tracking_reward
+        reward_info["reward_ctrl"] = 0
         reward_info["reward_survive"] = healthy_reward
         
-        # ==========================================
-        # 비용 계산 (정규화 적용)
-        # ==========================================
-        
-        # 적응 계수 (커리큘럼에 따라 감소)
         adaptation_factor = 1.0 - 0.3 * self.curriculum_factor
         
-        # 레벨 1: 치명적 실패
-        flipped_cost = self._normalize_reward_value(
-            self.flipped_over_cost * adjusted_cost_weights["flipped_over"], 10.0
-        )
-        hip_ground_cost = self._normalize_reward_value(
-            self.hip_ground_contact_cost * adjusted_cost_weights["hip_ground_contact"], 10.0
-        )
-        shoulder_below_cost = self._normalize_reward_value(
-            self.shoulder_below_pelvis_cost * adjusted_cost_weights["shoulder_below_pelvis"], 10.0
-        )
-        
-        # 레벨 2: 주요 실패
-        unwanted_contact_cost = self._normalize_reward_value(
-            self.biped_unwanted_contact_cost * adjusted_cost_weights["biped_unwanted_contact"], 10.0
-        )
-        front_contact_cost = self._normalize_reward_value(
-            self.biped_front_contact_cost * adjusted_cost_weights["biped_front_contact"], 10.0
-        )
-        front_feet_below_cost = self._normalize_reward_value(
-            self.biped_front_feet_below_hips_cost * adjusted_cost_weights["biped_front_feet_below_hips"], 10.0
-        )
-        joint_limit_cost = self._normalize_reward_value(
-            self.joint_limit_cost * adjusted_cost_weights["joint_limit"], 10.0
+        ctrl_cost = self.torque_cost * self.cost_weights["torque"] * adaptation_factor
+        action_rate_cost_val = self.action_rate_cost(action) * self.cost_weights["action_rate"] * adaptation_factor
+        vertical_vel_cost = self.vertical_velocity_cost * self.cost_weights["vertical_vel"]
+        xy_angular_vel_cost = self.xy_angular_velocity_cost * self.cost_weights["xy_angular_vel"]
+        joint_limit_cost = self.joint_limit_cost * self.cost_weights["joint_limit"]
+        joint_velocity_cost_val = self.joint_velocity_cost * self.cost_weights["joint_velocity"] * adaptation_factor
+        joint_acceleration_cost = self.acceleration_cost * self.cost_weights["joint_acceleration"]
+        orientation_cost = self.non_flat_base_cost * self.cost_weights["orientation"]
+        collision_cost = self.collision_cost * self.cost_weights["collision"]
+        default_joint_position_cost = (
+            self.default_joint_position_cost * self.cost_weights["default_joint_position"]
         )
         
-        # 레벨 3: 자세 제약
-        self_collision_cost = self._normalize_reward_value(
-            self.self_collision_cost * adjusted_cost_weights["self_collision"], 10.0
-        )
-        pitch_stability_cost = self._normalize_reward_value(
-            self.biped_pitch_stability_cost * adjusted_cost_weights["biped_pitch_stability"], 10.0
-        )
-        roll_stability_cost = self._normalize_reward_value(
-            self.biped_roll_stability_cost * adjusted_cost_weights["biped_roll_stability"], 10.0
-        )
-        low_rear_hips_cost = self._normalize_reward_value(
-            self.biped_low_rear_hips_cost * adjusted_cost_weights["biped_low_rear_hips"], 10.0
-        )
-        body_height_cost = self._normalize_reward_value(
-            self.biped_body_height_cost * adjusted_cost_weights["biped_body_height"], 10.0
-        )
-        collision_cost = self._normalize_reward_value(
-            self.collision_cost * adjusted_cost_weights["collision"], 10.0
+        # 몸통이 뒤집힌 경우 비용 추가
+        flipped_cost = self.flipped_over_cost * self.cost_weights["flipped_over"]
+        reward_info["flipped_over_cost"] = -flipped_cost
+
+        costs = (
+            ctrl_cost + action_rate_cost_val + vertical_vel_cost + xy_angular_vel_cost +
+            joint_limit_cost + joint_velocity_cost_val + joint_acceleration_cost +
+            collision_cost + flipped_cost # 몸통이 뒤집힌 경우 비용 추가
         )
         
-        # 레벨 4: 부드러운 동작
-        front_foot_height_cost = self._normalize_reward_value(
-            self.biped_front_foot_height_cost * adjusted_cost_weights["biped_front_foot_height"], 10.0
-        )
-        crossed_legs_cost = self._normalize_reward_value(
-            self.biped_crossed_legs_cost * adjusted_cost_weights["biped_crossed_legs"], 10.0
-        )
+
+        biped_cost_scale = 0.5 + 0.5 * self.curriculum_factor
+        
+        front_contact_cost = self.biped_front_contact_cost * self.cost_weights["biped_front_contact"] * biped_cost_scale
         rear_feet_airborne_cost = 0.0
         if np.all(self.feet_contact_forces[2:] < 1.0):
-            rear_feet_airborne_cost = self._normalize_reward_value(
-                adjusted_cost_weights["biped_rear_feet_airborne"], 10.0
-            )
-        vertical_vel_cost = self._normalize_reward_value(
-            self.vertical_velocity_cost * adjusted_cost_weights["vertical_vel"], 10.0
-        )
-        orientation_cost = self._normalize_reward_value(
-            self.non_flat_base_cost * adjusted_cost_weights["orientation"], 10.0
+            rear_feet_airborne_cost = self.cost_weights["biped_rear_feet_airborne"]
+        front_foot_height_cost = self.biped_front_foot_height_cost * self.cost_weights["biped_front_foot_height"]
+        crossed_legs_cost = self.biped_crossed_legs_cost * self.cost_weights["biped_crossed_legs"] * biped_cost_scale
+        low_rear_hips_cost = self.biped_low_rear_hips_cost * self.cost_weights["biped_low_rear_hips"] * biped_cost_scale
+        front_feet_below_hips_cost = self.biped_front_feet_below_hips_cost * self.cost_weights["biped_front_feet_below_hips"]
+        abduction_joints_cost = self.biped_abduction_joints_cost * self.cost_weights["biped_abduction_joints"]
+        unwanted_contact_cost = self.biped_unwanted_contact_cost * self.cost_weights["biped_unwanted_contact"]
+        self_collision_cost_val = self.self_collision_cost * self.cost_weights["self_collision"]
+        body_height_cost = self.biped_body_height_cost * self.cost_weights["biped_body_height"]
+        roll_stability_cost = self.biped_roll_stability_cost * self.cost_weights["biped_roll_stability"]
+        pitch_stability_cost = self.biped_pitch_stability_cost * self.cost_weights["biped_pitch_stability"]
+        
+        # 어깨가 골반보다 낮은 경우 비용 추가
+        shoulder_below_pelvis_cost = self.shoulder_below_pelvis_cost * self.cost_weights["shoulder_below_pelvis"]
+        
+        # hip이 땅에 닿을 때 비용 추가
+        hip_ground_contact_cost = self.hip_ground_contact_cost * self.cost_weights["hip_ground_contact"]
+        
+        costs += (
+            front_contact_cost + rear_feet_airborne_cost + front_foot_height_cost +
+            crossed_legs_cost + low_rear_hips_cost + front_feet_below_hips_cost +
+            abduction_joints_cost + unwanted_contact_cost + self_collision_cost_val +
+            body_height_cost + roll_stability_cost + pitch_stability_cost +
+            shoulder_below_pelvis_cost + hip_ground_contact_cost
         )
         
-        # 레벨 5: 미세 조정
-        abduction_joints_cost = self._normalize_reward_value(
-            self.biped_abduction_joints_cost * adjusted_cost_weights["biped_abduction_joints"], 10.0
-        )
-        xy_angular_vel_cost = self._normalize_reward_value(
-            self.xy_angular_velocity_cost * adjusted_cost_weights["xy_angular_vel"], 10.0
-        )
-        default_joint_cost = self._normalize_reward_value(
-            self.default_joint_position_cost * adjusted_cost_weights["default_joint_position"], 10.0
-        )
-        joint_velocity_cost = self._normalize_reward_value(
-            self.joint_velocity_cost * adjusted_cost_weights["joint_velocity"] * adaptation_factor, 10.0
-        )
-        action_rate_cost = self._normalize_reward_value(
-            self.action_rate_cost(action) * adjusted_cost_weights["action_rate"] * adaptation_factor, 10.0
-        )
-        torque_cost = self._normalize_reward_value(
-            self.torque_cost * adjusted_cost_weights["torque"] * adaptation_factor, 10.0
-        )
-        joint_acceleration_cost = self._normalize_reward_value(
-            self.acceleration_cost * adjusted_cost_weights["joint_acceleration"], 10.0
-        )
-        
-        # 총 비용 합산
-        costs = (flipped_cost + hip_ground_cost + shoulder_below_cost + 
-                unwanted_contact_cost + front_contact_cost + front_feet_below_cost + joint_limit_cost +
-                self_collision_cost + pitch_stability_cost + roll_stability_cost + 
-                low_rear_hips_cost + body_height_cost + collision_cost +
-                front_foot_height_cost + crossed_legs_cost + rear_feet_airborne_cost +
-                vertical_vel_cost + orientation_cost +
-                abduction_joints_cost + xy_angular_vel_cost + default_joint_cost +
-                joint_velocity_cost + action_rate_cost + torque_cost + joint_acceleration_cost)
-        
-        # 비용 정보 저장 (음수로 저장)
-        reward_info["flipped_over_cost"] = -flipped_cost
-        reward_info["hip_ground_contact_cost"] = -hip_ground_cost
-        reward_info["shoulder_below_pelvis_cost"] = -shoulder_below_cost
         reward_info["biped_front_contact_cost"] = -front_contact_cost
+        reward_info["biped_rear_feet_airborne_cost"] = -rear_feet_airborne_cost
+        reward_info["biped_front_foot_height_cost"] = -front_foot_height_cost
+        reward_info["biped_crossed_legs_cost"] = -crossed_legs_cost
+        reward_info["biped_low_rear_hips_cost"] = -low_rear_hips_cost
+        reward_info["biped_front_feet_below_hips_cost"] = -front_feet_below_hips_cost
+        reward_info["biped_abduction_joints_cost"] = -abduction_joints_cost
         reward_info["biped_unwanted_contact_cost"] = -unwanted_contact_cost
-        reward_info["self_collision_cost"] = -self_collision_cost
-        reward_info["reward_ctrl"] = -torque_cost
+        reward_info["self_collision_cost"] = -self_collision_cost_val
+        reward_info["biped_body_height_cost"] = -body_height_cost
+        reward_info["biped_roll_stability_cost"] = -roll_stability_cost
+        reward_info["biped_pitch_stability_cost"] = -pitch_stability_cost
+        reward_info["shoulder_below_pelvis_cost"] = -shoulder_below_pelvis_cost
+        reward_info["hip_ground_contact_cost"] = -hip_ground_contact_cost
+
+        reward_info["reward_ctrl"] = -ctrl_cost
         
-        # ==========================================
-        # 최종 보상 계산 (범위: -10 ~ +10)
-        # ==========================================
-        raw_reward = rewards - costs
+        reward = rewards - costs
+        reward = max(0.0, reward) * (1.0 + 0.2 * self.curriculum_factor)
         
-        # 이동 평균 기반 정규화 (선택적)
-        if len(self._reward_history) > 10:
-            self._reward_history.append(rewards)
-            self._cost_history.append(costs)
-            if len(self._reward_history) > self._reward_normalizer_window:
-                self._reward_history.pop(0)
-                self._cost_history.pop(0)
-            
-            # 안정적인 스케일링을 위한 percentile 기반 정규화
-            reward_p95 = np.percentile(self._reward_history, 95)
-            cost_p95 = np.percentile(self._cost_history, 95)
-            
-            if reward_p95 > 0 and cost_p95 > 0:
-                normalized_rewards = rewards / reward_p95 * 5.0
-                normalized_costs = costs / cost_p95 * 5.0
-                raw_reward = normalized_rewards - normalized_costs
-        
-        # 최종 클리핑 및 커리큘럼 보너스
-        final_reward = np.clip(raw_reward, -10.0, 10.0)
-        final_reward = final_reward * (1.0 + 0.1 * self.curriculum_factor)  # 10% 보너스
-        
-        return final_reward, reward_info
+        return reward, reward_info
     
     def _get_obs(self):
-        """48차원 관찰 공간 유지 - 원본과 동일"""
+        """48개의 관측 변수를 반환합니다."""
         dofs_position = self.data.qpos[7:].flatten() - self.model.key_qpos[0, 7:]
         
         velocity = self.data.qvel.flatten()
@@ -1037,7 +852,7 @@ class Go1MujocoEnv(MujocoEnv):
             )
         ).clip(-self._clip_obs_threshold, self._clip_obs_threshold)
         
-        return curr_obs  # 총 48차원
+        return curr_obs  # 48개의 관측 변수
     
     def reset_model(self):
         qpos = self.model.key_qpos[0].copy()
@@ -1081,11 +896,11 @@ class Go1MujocoEnv(MujocoEnv):
         self._front_feet_touched = False
         self._last_feet_contact_forces = np.zeros(4)
         self._balance_history = []
-        self._time_flipped_over = 0.0 #  타이머 초기화 추가
-        self._time_shoulder_below_pelvis = 0.0  # 8. 어깨-골반 높이 타이머 초기화 
-        self._time_hip_on_ground = 0.0  # 9. hip 접촉 타이머 초기화
+        self._time_flipped_over = 0.0 # 몸통이 뒤집힌 경우 타이머
+        self._time_shoulder_below_pelvis = 0.0  # 어깨가 골반보다 낮은 경우 타이머
+        self._time_hip_on_ground = 0.0  # hip이 땅에 닿을 때 타이머
         
-        # ✨ [신규 추가] 실시간 저장을 위한 에피소드별 변수 초기화
+        # 보상 계산
         self._current_episode_reward = 0.0
         self._current_episode_length = 0
 
@@ -1127,11 +942,11 @@ class Go1MujocoEnv(MujocoEnv):
         
         return roll_x, pitch_y, yaw_z
     
-    # ✨ [신규 추가] 실시간 저장을 위한 데이터 수집 메서드들
+    # 보상 계산
     def get_detailed_episode_info(self):
-        """에피소드별 상세 정보를 반환합니다. 실시간 저장용입니다."""
+        """보상 계산"""
         try:
-            # 기본 에피소드 정보
+            # 에피소드 정보
             episode_info = {
                 'episode_count': self._episode_count,
                 'success_count': self._success_count,
@@ -1141,7 +956,7 @@ class Go1MujocoEnv(MujocoEnv):
                 'time_remaining': max(0, self._max_episode_time_sec - self._step * self.dt),
             }
             
-            # 로봇 상태 정보
+            # 로봇 상태
             robot_state = {
                 'position': {
                     'x': float(self.data.qpos[0]),
@@ -1163,15 +978,15 @@ class Go1MujocoEnv(MujocoEnv):
                 'joint_accelerations': self.data.qacc[6:].tolist() if hasattr(self.data, 'qacc') else None,
             }
             
-            # 보상 및 비용 정보
+            # 보상 정보
             reward_info = {
-                'current_episode_reward': getattr(self, '_current_episode_reward', 0.0),  # 현재 에피소드 누적 보상
+                'current_episode_reward': getattr(self, '_current_episode_reward', 0.0),  # 현재 에피소드 보상
                 'current_episode_length': getattr(self, '_current_episode_length', 0),    # 현재 에피소드 길이
                 'reward_weights': self.reward_weights.copy(),
                 'cost_weights': self.cost_weights.copy(),
             }
             
-            # 환경 설정 정보
+            # 환경 설정
             env_config = {
                 'ctrl_type': getattr(self, 'ctrl_type', 'unknown'),
                 'biped': self.biped,
@@ -1186,7 +1001,7 @@ class Go1MujocoEnv(MujocoEnv):
                 'healthy_roll_range': self._healthy_roll_range,
             }
             
-            # 발 접촉 정보
+            # 접촉 정보
             contact_info = {
                 'feet_contact_forces': self.feet_contact_forces.tolist(),
                 'front_feet_contact_forces': self.front_feet_contact_forces.tolist(),
@@ -1194,7 +1009,7 @@ class Go1MujocoEnv(MujocoEnv):
                 'last_contacts': self._last_contacts.tolist(),
             }
             
-            # 안정성 메트릭
+            # 안정성 정보
             stability_metrics = {
                 'is_healthy': self.is_healthy,
                 'is_flipped_over': self.is_flipped_over,
@@ -1210,7 +1025,7 @@ class Go1MujocoEnv(MujocoEnv):
                 'balance_history': self._balance_history.copy() if hasattr(self, '_balance_history') else [],
             }
             
-            # 최근 액션 정보
+            # 액션 정보
             action_info = {
                 'last_action': self._last_action.tolist(),
                 'last_feet_contact_forces': self._last_feet_contact_forces.tolist(),
@@ -1229,7 +1044,7 @@ class Go1MujocoEnv(MujocoEnv):
             }
             
         except Exception as e:
-            # 오류 발생 시 기본 정보만 반환
+            # 오류 정보
             return {
                 'episode_info': {
                     'episode_count': self._episode_count,
@@ -1237,11 +1052,11 @@ class Go1MujocoEnv(MujocoEnv):
                     'error': str(e)
                 },
                 'timestamp': time.time(),
-                'error': f"상세 정보 수집 중 오류 발생: {str(e)}"
+                'error': f"오류: {str(e)}"
             }
     
     def get_environment_summary(self):
-        """환경의 전체 요약 정보를 반환합니다. 실시간 저장용입니다."""
+        """환경 정보"""
         try:
             return {
                 'environment_class': self.__class__.__name__,
@@ -1273,14 +1088,14 @@ class Go1MujocoEnv(MujocoEnv):
         except Exception as e:
             return {
                 'environment_class': self.__class__.__name__,
-                'error': f"환경 요약 수집 중 오류 발생: {str(e)}",
+                'error': f"오류: {str(e)}",
                 'timestamp': time.time(),
             }
     
     def get_performance_metrics(self):
-        """현재 에피소드의 성능 메트릭을 반환합니다. 실시간 저장용입니다."""
+        """성능 지표"""
         try:
-            # 보상 컴포넌트 계산
+            # 보상 구성 요소
             reward_components = {}
             if hasattr(self, 'reward_weights'):
                 for key in self.reward_weights:
@@ -1290,7 +1105,7 @@ class Go1MujocoEnv(MujocoEnv):
                         except:
                             reward_components[key] = 0.0
             
-            # 비용 컴포넌트 계산
+            # 비용 구성 요소
             cost_components = {}
             if hasattr(self, 'cost_weights'):
                 for key in self.cost_weights:
@@ -1305,7 +1120,7 @@ class Go1MujocoEnv(MujocoEnv):
             if hasattr(self, '_balance_history') and self._balance_history:
                 stability_score = float(np.mean(self._balance_history))
             
-            # 진행률
+            # 진행 상태
             progress = min(1.0, self._step / (self._max_episode_time_sec / self.dt))
             
             return {
@@ -1327,6 +1142,6 @@ class Go1MujocoEnv(MujocoEnv):
             }
         except Exception as e:
             return {
-                'error': f"성능 메트릭 수집 중 오류 발생: {str(e)}",
+                'error': f"오류: {str(e)}",
                 'timestamp': time.time(),
-            }
+            }   

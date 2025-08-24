@@ -5,7 +5,7 @@ from pathlib import Path
 
 import gymnasium as gym
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from go1_mujoco_env import Go1MujocoEnv
@@ -120,12 +120,20 @@ def train(args):
     realtime_saving_callback = ComprehensiveSavingCallback(
         save_dir=f"{model_path}/realtime_data",
         save_frequency=1000,  # 매 1000 스텝마다 저장
-        checkpoint_frequency=10000,  # 매 10000 스텝마다 체크포인트
+        checkpoint_frequency=args.checkpoint_frequency,  # 사용자 지정 체크포인트 주기
         total_timesteps=args.total_timesteps,  # 전체 학습 타임스텝 수 전달
         verbose=1
     )
 
-    callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback, realtime_saving_callback])
+    # ✨ [신규 추가] Stable Baselines3 기본 체크포인트 콜백 (추가 안전장치)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=args.sb3_checkpoint_frequency,  # 사용자 지정 SB3 체크포인트 주기
+        save_path=f"{model_path}/checkpoints",
+        name_prefix="sb3_checkpoint",
+        verbose=1
+    )
+
+    callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback, realtime_saving_callback, checkpoint_callback])
 
     # ✨ [수정] PPO 모델을 불러오거나 생성할 때 learning_rate 인자 추가
     if args.model_path is not None:
@@ -247,6 +255,20 @@ if __name__ == "__main__":
         help="Scale of the random noise added to actions every 0.5s.",
     )
     # ✨ --- 수정된 부분 끝 --- ✨
+
+    # ✨ [신규 추가] 체크포인트 관련 인자들
+    parser.add_argument(
+        "--checkpoint_frequency",
+        type=int,
+        default=10000,
+        help="Frequency of custom checkpoint saves (in timesteps)",
+    )
+    parser.add_argument(
+        "--sb3_checkpoint_frequency",
+        type=int,
+        default=50000,
+        help="Frequency of Stable Baselines3 default checkpoint saves (in timesteps)",
+    )
 
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

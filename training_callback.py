@@ -1144,13 +1144,17 @@ class RealTimeSavingCallback(BaseCallback):
             print(f"❌ 하이퍼파라미터 저장 실패: {e}")
     
     def _save_checkpoint(self):
-        """학습 체크포인트 저장"""
+        """학습 체크포인트 저장 - 실제 모델 파일과 메타데이터 모두 저장"""
         # ✨ [수정] model이 존재하는지 안전하게 확인
         if not hasattr(self, 'model') or self.model is None:
             return
             
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        checkpoint_file = f"{self.save_dir}/checkpoints/checkpoint_{timestamp}.json"
+        checkpoint_dir = f"{self.save_dir}/checkpoints/checkpoint_{timestamp}"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # 1. JSON 메타데이터 저장
+        checkpoint_meta_file = f"{checkpoint_dir}/checkpoint_meta.json"
         
         try:
             checkpoint_data = {
@@ -1174,18 +1178,35 @@ class RealTimeSavingCallback(BaseCallback):
                 'recovery_info': {
                     'checkpoint_time': time.time(),
                     'can_resume': True,
-                    'resume_instructions': "이 체크포인트를 사용하여 학습을 재개하려면 train.py에서 --model_path 인자로 해당 모델 파일을 지정하세요."
+                    'resume_instructions': "이 체크포인트를 사용하여 학습을 재개하려면 train.py에서 --model_path 인자로 해당 모델 파일을 지정하세요.",
+                    'model_file_path': f"{checkpoint_dir}/model.zip"
                 }
             }
             
-            with open(checkpoint_file, 'w', encoding='utf-8') as f:
+            with open(checkpoint_meta_file, 'w', encoding='utf-8') as f:
                 json.dump(checkpoint_data, f, indent=2, ensure_ascii=False)
             
+            # 2. 실제 모델 파일 저장 (.zip)
+            model_file_path = f"{checkpoint_dir}/model.zip"
+            try:
+                self.model.save(model_file_path)
+                if self.verbose > 0:
+                    print(f"💾 체크포인트 모델 저장: {model_file_path}")
+            except Exception as model_save_error:
+                print(f"❌ 모델 파일 저장 실패: {model_save_error}")
+                checkpoint_data['model_save_error'] = str(model_save_error)
+                # 메타데이터에 오류 정보 추가
+                with open(checkpoint_meta_file, 'w', encoding='utf-8') as f:
+                    json.dump(checkpoint_data, f, indent=2, ensure_ascii=False)
+            
             if self.verbose > 0:
-                print(f"💾 체크포인트 저장: {checkpoint_file}")
+                print(f"💾 체크포인트 메타데이터 저장: {checkpoint_meta_file}")
+                print(f"📁 체크포인트 디렉토리: {checkpoint_dir}")
                 
         except Exception as e:
             print(f"❌ 체크포인트 저장 실패: {e}")
+            import traceback
+            print(f"상세 오류: {traceback.format_exc()}")
     
     def on_training_end(self) -> None:
         """학습 종료 시 최종 데이터 저장"""
