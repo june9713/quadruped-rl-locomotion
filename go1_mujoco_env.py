@@ -2,8 +2,8 @@ from gymnasium import spaces
 from gymnasium.envs.mujoco import MujocoEnv
 import mujoco
 import numpy as np
-import random
 from pathlib import Path
+import time
 
 DEFAULT_CAMERA_CONFIG = {
     "azimuth": 90.0,
@@ -29,11 +29,16 @@ class Go1MujocoEnv(MujocoEnv):
         0.0, 2.6, -1.4,    # RL
     ])
     
-    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, **kwargs):
+    def __init__(self, ctrl_type="torque", biped=False, rand_power=0.0, action_noise=0.0, **kwargs):
         model_path = Path(f"./unitree_go1/scene_{ctrl_type}.xml")
         self.biped = biped
         self._rand_power = rand_power
         
+        # ✨ --- 수정된 부분 시작 --- ✨
+        self._action_noise_scale = action_noise
+        self._time_since_last_noise = 0.0
+        # ✨ --- 수정된 부분 끝 --- ✨
+
         MujocoEnv.__init__(
             self,
             model_path=model_path.absolute().as_posix(),
@@ -77,6 +82,7 @@ class Go1MujocoEnv(MujocoEnv):
             "orientation": 1.0,
             "collision": 1.0,
             "default_joint_position": 0.05,
+            "flipped_over": 150.0,  #  1. 뒤집힘 비용 가중치 추가 
         }
         
         if self.biped:
@@ -93,6 +99,8 @@ class Go1MujocoEnv(MujocoEnv):
             self.cost_weights["biped_body_height"] = 4.0
             self.cost_weights["biped_roll_stability"] = 6.0
             self.cost_weights["biped_pitch_stability"] = 8.0
+            self.cost_weights["shoulder_below_pelvis"] = 100.0  # 4. 어깨가 골반보다 낮을 때 큰 감점
+            self.cost_weights["hip_ground_contact"] = 200.0  # 5. hip이 땅에 닿을 때 매우 큰 감점
             
         self._curriculum_base = 0.3
         self._gravity_vector = np.array(self.model.opt.gravity)
@@ -123,8 +131,7 @@ class Go1MujocoEnv(MujocoEnv):
         
         dof_position_limit_multiplier = 0.95
         ctrl_range_offset = (
-            0.5 * (1 - dof_position_limit_multiplier) * 
-            (self.model.actuator_ctrlrange[:, 1] - self.model.actuator_ctrlrange[:, 0])
+            0.5 * (1 - dof_position_limit_multiplier) * (self.model.actuator_ctrlrange[:, 1] - self.model.actuator_ctrlrange[:, 0])
         )
         self._soft_joint_range = np.copy(self.model.actuator_ctrlrange)
         self._soft_joint_range[:, 0] += ctrl_range_offset
@@ -152,6 +159,10 @@ class Go1MujocoEnv(MujocoEnv):
         
         if self.biped:
             self._initialize_biped_body_ids()
+
+        self._time_flipped_over = 0.0 #  2. 뒤집힘 타이머 변수 추가
+        self._time_shoulder_below_pelvis = 0.0  # 3. 어깨가 골반보다 낮은 상태 지속 시간
+        self._time_hip_on_ground = 0.0  # 4. hip이 땅에 닿은 상태 지속 시간
     
     def _initialize_biped_body_ids(self):
         front_knee_body_names = ["FR_calf", "FL_calf"]
@@ -207,15 +218,39 @@ class Go1MujocoEnv(MujocoEnv):
     def curriculum_factor(self):
         progress = min(1.0, self._episode_count / 1000.0)
         return progress
-    
+    @property
+    def _trunk_up_alignment(self):
+        """Helper to get alignment of trunk's z-axis with world's up-axis."""
+        world_up_vector = np.array([0, 0, 1])
+        # 몸통 회전 행렬의 3번째 열이 몸통의 Z축(Up 벡터)을 월드 좌표계 기준으로 나타냅니다.
+        trunk_up_vector = self.data.xmat[self._main_body_id].reshape(3, 3)[:, 2]
+        return np.dot(trunk_up_vector, world_up_vector)
+
+    @property
+    def is_flipped_over(self):
+        """Check if the robot is flipped over."""
+        # 몸통의 Up 벡터와 세상의 Up 벡터의 내적 값이 음수이면 뒤집힌 상태입니다.
+        return self._trunk_up_alignment < 0.0
+
+    @property
+    def flipped_over_cost(self):
+        """Calculate cost for being flipped over."""
+        alignment = self._trunk_up_alignment
+        if alignment < 0:
+            # 뒤집혔을 때, alignment 값은 0 ~ -1 사이입니다.
+            # 제곱을 하여 -1에 가까울수록 (완전히 뒤집힐수록) 비용이 1에 가깝게 증가합니다.
+            return np.square(alignment)
+        return 0.0
+
+
     @property
     def forward_velocity_reward(self):
         forward_vel = self.data.qvel[0]
         target_vel = 0.2
         vel_error = abs(forward_vel - target_vel)
         reward = np.exp(-5.0 * vel_error)
-        #if forward_vel < 0:
-        #    reward *= 0.1
+        if forward_vel < 0:
+            reward *= 0.1
         return reward
     
     @property
@@ -382,6 +417,76 @@ class Go1MujocoEnv(MujocoEnv):
         return 0.0
     
     @property
+    def shoulder_below_pelvis_cost(self):
+        """어깨가 골반보다 낮을 때의 비용을 계산합니다."""
+        if not self.biped:
+            return 0.0
+        
+        # 어깨 위치 (FR_hip, FL_hip의 평균)
+        shoulder_pos = self.data.xpos[self._front_hip_body_ids]
+        shoulder_z = np.mean(shoulder_pos[:, 2])
+        
+        # 골반 위치 (RR_hip, RL_hip의 평균)
+        pelvis_pos = self.data.xpos[self._rear_hip_body_ids]
+        pelvis_z = np.mean(pelvis_pos[:, 2])
+        
+        # 어깨가 골반보다 낮을 때의 높이 차이
+        height_difference = pelvis_z - shoulder_z
+        
+        if height_difference > 0:  # 어깨가 골반보다 낮음
+            # 높이 차이가 클수록 비용이 급격히 증가
+            return np.square(height_difference) * 10.0
+        return 0.0
+    
+    @property
+    def is_shoulder_below_pelvis(self):
+        """어깨가 골반보다 낮은지 확인합니다."""
+        if not self.biped:
+            return False
+        
+        shoulder_pos = self.data.xpos[self._front_hip_body_ids]
+        shoulder_z = np.mean(shoulder_pos[:, 2])
+        
+        pelvis_pos = self.data.xpos[self._rear_hip_body_ids]
+        pelvis_z = np.mean(pelvis_pos[:, 2])
+        
+        return shoulder_z < pelvis_z
+    
+    @property
+    def is_hip_on_ground(self):
+        """hip이 땅에 닿는지 확인합니다."""
+        # 모든 hip body들의 접촉 힘을 확인
+        all_hip_body_ids = self._front_hip_body_ids + self._rear_hip_body_ids
+        hip_contact_forces = self.data.cfrc_ext[all_hip_body_ids]
+        
+        # 접촉 힘의 크기가 임계값(0.1)을 초과하면 땅에 닿은 것으로 판단
+        contact_threshold = 0.1
+        return np.any(np.linalg.norm(hip_contact_forces, axis=1) > contact_threshold)
+    
+    @property
+    def hip_ground_contact_cost(self):
+        """hip이 땅에 닿을 때의 비용을 계산합니다."""
+        if not self.is_hip_on_ground:
+            return 0.0
+        
+        # hip이 땅에 닿은 경우, 접촉 힘의 크기에 비례하여 비용 계산
+        all_hip_body_ids = self._front_hip_body_ids + self._rear_hip_body_ids
+        hip_contact_forces = self.data.cfrc_ext[all_hip_body_ids]
+        
+        # 접촉 힘의 크기를 계산하고 제곱하여 비용 증가
+        contact_magnitudes = np.linalg.norm(hip_contact_forces, axis=1)
+        active_contacts = contact_magnitudes > 0.1
+        
+        if not np.any(active_contacts):
+            return 0.0
+        
+        # 활성 접촉에 대해서만 비용 계산
+        active_contact_forces = contact_magnitudes[active_contacts]
+        cost = np.sum(np.square(active_contact_forces))
+        
+        return cost
+    
+    @property
     def biped_front_contact_cost(self):
         contact_forces = self.front_feet_contact_forces
         return np.sum(np.power(contact_forces, 1.5))
@@ -405,34 +510,42 @@ class Go1MujocoEnv(MujocoEnv):
         if not np.isfinite(state).all():
             return False, "state_not_finite", f"State values are not finite: {state}"
         
-        if self._episode_count < 100:
-            return True, "not_terminated", "Early learning phase"
+        # 뒤집힌 상태가 1초 이상 지속되면 에피소드 종료 
+        if self._time_flipped_over > 1.0:
+            return False, "flipped_over_timeout", f"Flipped over for {self._time_flipped_over:.2f}s > 1.0s"
         
-        min_z = 0.15 if self.curriculum_factor < 0.5 else 0.20
-        if state[2] < min_z:
-            return False, "body_too_low", f"Body height: {state[2]:.3f}m < {min_z:.2f}m"
+        # 6. 어깨가 골반보다 낮은 상태가 1초 이상 지속되면 에피소드 종료
+        if self._time_shoulder_below_pelvis > 1.0:
+            return False, "shoulder_below_pelvis_timeout", f"Shoulder below pelvis for {self._time_shoulder_below_pelvis:.2f}s > 1.0s"
         
-        w, x, y, z = state[3:7]
-        roll, pitch, _ = self.euler_from_quaternion(w, x, y, z)
-        
-        max_roll = np.deg2rad(60 - 15 * self.curriculum_factor)
-        if abs(roll) > max_roll:
-            return False, "excessive_roll", f"Roll: {np.rad2deg(roll):.1f}° > {np.rad2deg(max_roll):.1f}°"
-        
-        if self.biped:
-            target_pitch = np.deg2rad(-90)
-            max_pitch_dev = np.deg2rad(90 - 10 * self.curriculum_factor)
-            if abs(pitch - target_pitch) > max_pitch_dev:
-                return False, "excessive_pitch", f"Pitch deviation: {np.rad2deg(abs(pitch - target_pitch)):.1f}°"
+        # 7. hip이 땅에 닿은 상태가 1초 이상 지속되면 에피소드 종료
+        if self._time_hip_on_ground > 1.0:
+            return False, "hip_ground_contact_timeout", f"Hip on ground for {self._time_hip_on_ground:.2f}s > 1.0s"
         
         return True, "not_terminated", "Healthy"
     
     def step(self, action):
         self._step += 1
         
-        if self.curriculum_factor < 0.3:
-            action = 0.7 * self._last_action + 0.3 * action
+        #if self.curriculum_factor < 0.3:
+         #   action = 0.7 * self._last_action + 0.3 * action
         
+        # ✨ --- 수정된 부분 시작 --- ✨
+        # 0.5초마다 커리큘럼에 따라 강도가 조절된 노이즈를 action에 추가합니다.
+        self._time_since_last_noise += self.dt
+        if self._time_since_last_noise > 0.5:#True:#self._action_noise_scale > 0.0 and self._time_since_last_noise > 0.5:
+            # 커리큘럼에 따라 현재 노이즈 레벨을 계산합니다.
+            #print("noise added")
+            current_noise_level = self._action_noise_scale * self.curriculum_factor
+            # 노이즈를 생성하고 action에 더합니다.
+            noise = np.random.normal(0, current_noise_level, size=action.shape)
+            action = action + noise 
+            # action 값이 유효 범위 [-1, 1]을 벗어나지 않도록 클리핑합니다.
+            #action = np.clip(action, -1.0, 1.0)
+            # 타이머를 리셋합니다.
+            self._time_since_last_noise = 0.0
+        # ✨ --- 수정된 부분 끝 --- ✨
+
         front_contact_in_step = False
         if self.biped:
             if np.any(self.front_feet_contact_forces > 1.0):
@@ -441,8 +554,30 @@ class Go1MujocoEnv(MujocoEnv):
         
         self.do_simulation(action, self.frame_skip)
         
+        #  매 스텝마다 뒤집힘 상태를 확인하고 타이머 업데이트 
+        if self.is_flipped_over:
+            self._time_flipped_over += self.dt
+        else:
+            self._time_flipped_over = 0.0
+        
+        # 5. 매 스텝마다 어깨-골반 높이 상태를 확인하고 타이머 업데이트
+        if self.is_shoulder_below_pelvis:
+            self._time_shoulder_below_pelvis += self.dt
+        else:
+            self._time_shoulder_below_pelvis = 0.0
+        
+        # 6. 매 스텝마다 hip 접촉 상태를 확인하고 타이머 업데이트
+        if self.is_hip_on_ground:
+            self._time_hip_on_ground += self.dt
+        else:
+            self._time_hip_on_ground = 0.0
+            
         observation = self._get_obs()
         reward, reward_info = self._calc_reward(action)
+        
+        # ✨ [신규 추가] 실시간 저장을 위한 보상 정보 업데이트
+        self._current_episode_reward = getattr(self, '_current_episode_reward', 0.0) + reward
+        self._current_episode_length = getattr(self, '_current_episode_length', 0) + 1
         
         terminated = not self.is_healthy
         truncated = self._step >= (self._max_episode_time_sec / self.dt)
@@ -628,10 +763,14 @@ class Go1MujocoEnv(MujocoEnv):
             self.default_joint_position_cost * self.cost_weights["default_joint_position"]
         )
         
+        #  뒤집힘 비용 계산 
+        flipped_cost = self.flipped_over_cost * self.cost_weights["flipped_over"]
+        reward_info["flipped_over_cost"] = -flipped_cost
+
         costs = (
             ctrl_cost + action_rate_cost_val + vertical_vel_cost + xy_angular_vel_cost +
             joint_limit_cost + joint_velocity_cost_val + joint_acceleration_cost +
-            collision_cost
+            collision_cost + flipped_cost #  뒤집힘 비용 합산 
         )
         
         if self.biped:
@@ -652,11 +791,18 @@ class Go1MujocoEnv(MujocoEnv):
             roll_stability_cost = self.biped_roll_stability_cost * self.cost_weights["biped_roll_stability"]
             pitch_stability_cost = self.biped_pitch_stability_cost * self.cost_weights["biped_pitch_stability"]
             
+            # 7. 어깨-골반 높이 비용 추가
+            shoulder_below_pelvis_cost = self.shoulder_below_pelvis_cost * self.cost_weights["shoulder_below_pelvis"]
+            
+            # 8. hip ground contact 비용 추가
+            hip_ground_contact_cost = self.hip_ground_contact_cost * self.cost_weights["hip_ground_contact"]
+            
             costs += (
                 front_contact_cost + rear_feet_airborne_cost + front_foot_height_cost +
                 crossed_legs_cost + low_rear_hips_cost + front_feet_below_hips_cost +
                 abduction_joints_cost + unwanted_contact_cost + self_collision_cost_val +
-                body_height_cost + roll_stability_cost + pitch_stability_cost
+                body_height_cost + roll_stability_cost + pitch_stability_cost +
+                shoulder_below_pelvis_cost + hip_ground_contact_cost
             )
             
             reward_info["biped_front_contact_cost"] = -front_contact_cost
@@ -671,6 +817,8 @@ class Go1MujocoEnv(MujocoEnv):
             reward_info["biped_body_height_cost"] = -body_height_cost
             reward_info["biped_roll_stability_cost"] = -roll_stability_cost
             reward_info["biped_pitch_stability_cost"] = -pitch_stability_cost
+            reward_info["shoulder_below_pelvis_cost"] = -shoulder_below_pelvis_cost
+            reward_info["hip_ground_contact_cost"] = -hip_ground_contact_cost
         else:
             costs += orientation_cost + default_joint_position_cost
             reward_info["orientation_cost"] = -orientation_cost
@@ -714,18 +862,17 @@ class Go1MujocoEnv(MujocoEnv):
         qpos = self.model.key_qpos[0].copy()
         
         if self.biped:
-            if random.random() < 0.5:
-                qpos[7:] = self.BIPEDAL_READY_JOINTS
-                qpos[2] = 0.60
-                
-                pitch_angle = np.deg2rad(-90)
-                quat = np.array([
-                    np.cos(pitch_angle / 2),
-                    0,
-                    np.sin(pitch_angle / 2),
-                    0
-                ])
-                qpos[3:7] = quat
+            qpos[7:] = self.BIPEDAL_READY_JOINTS
+            qpos[2] = 0.60
+            
+            pitch_angle = np.deg2rad(-90)
+            quat = np.array([
+                np.cos(pitch_angle / 2),
+                0,
+                np.sin(pitch_angle / 2),
+                0
+            ])
+            qpos[3:7] = quat
         
         if self._rand_power > 0.0:
             noise_scale = 0.05 + 0.05 * self.curriculum_factor
@@ -755,7 +902,14 @@ class Go1MujocoEnv(MujocoEnv):
         self._front_feet_touched = False
         self._last_feet_contact_forces = np.zeros(4)
         self._balance_history = []
+        self._time_flipped_over = 0.0 #  타이머 초기화 추가
+        self._time_shoulder_below_pelvis = 0.0  # 8. 어깨-골반 높이 타이머 초기화 
+        self._time_hip_on_ground = 0.0  # 9. hip 접촉 타이머 초기화
         
+        # ✨ [신규 추가] 실시간 저장을 위한 에피소드별 변수 초기화
+        self._current_episode_reward = 0.0
+        self._current_episode_length = 0
+
         self._episode_count += 1
         
         observation = self._get_obs()
@@ -793,3 +947,207 @@ class Go1MujocoEnv(MujocoEnv):
         yaw_z = np.arctan2(t3, t4)
         
         return roll_x, pitch_y, yaw_z
+    
+    # ✨ [신규 추가] 실시간 저장을 위한 데이터 수집 메서드들
+    def get_detailed_episode_info(self):
+        """에피소드별 상세 정보를 반환합니다. 실시간 저장용입니다."""
+        try:
+            # 기본 에피소드 정보
+            episode_info = {
+                'episode_count': self._episode_count,
+                'success_count': self._success_count,
+                'success_rate': self._success_count / max(1, self._episode_count),
+                'current_step': self._step,
+                'max_episode_time': self._max_episode_time_sec,
+                'time_remaining': max(0, self._max_episode_time_sec - self._step * self.dt),
+            }
+            
+            # 로봇 상태 정보
+            robot_state = {
+                'position': {
+                    'x': float(self.data.qpos[0]),
+                    'y': float(self.data.qpos[1]),
+                    'z': float(self.data.qpos[2]),
+                    'distance_from_origin': float(np.linalg.norm(self.data.qpos[0:2], ord=2))
+                },
+                'orientation': {
+                    'quaternion': self.data.qpos[3:7].tolist(),
+                    'euler': self.euler_from_quaternion(*self.data.qpos[3:7]).tolist()
+                },
+                'velocity': {
+                    'linear': self.data.qvel[:3].tolist(),
+                    'angular': self.data.qvel[3:6].tolist(),
+                    'joint': self.data.qvel[6:].tolist()
+                },
+                'joint_positions': self.data.qpos[7:].tolist(),
+                'joint_velocities': self.data.qvel[6:].tolist(),
+                'joint_accelerations': self.data.qacc[6:].tolist() if hasattr(self.data, 'qacc') else None,
+            }
+            
+            # 보상 및 비용 정보
+            reward_info = {
+                'current_episode_reward': getattr(self, '_current_episode_reward', 0.0),  # 현재 에피소드 누적 보상
+                'current_episode_length': getattr(self, '_current_episode_length', 0),    # 현재 에피소드 길이
+                'reward_weights': self.reward_weights.copy(),
+                'cost_weights': self.cost_weights.copy(),
+            }
+            
+            # 환경 설정 정보
+            env_config = {
+                'ctrl_type': getattr(self, 'ctrl_type', 'unknown'),
+                'biped': self.biped,
+                'rand_power': self._rand_power,
+                'action_noise_scale': self._action_noise_scale,
+                'frame_skip': self.frame_skip,
+                'dt': self.dt,
+                'curriculum_factor': self.curriculum_factor,
+                'desired_velocity': self._desired_velocity.tolist(),
+                'healthy_z_range': self._healthy_z_range,
+                'healthy_pitch_range': self._healthy_pitch_range,
+                'healthy_roll_range': self._healthy_roll_range,
+            }
+            
+            # 발 접촉 정보
+            contact_info = {
+                'feet_contact_forces': self.feet_contact_forces.tolist(),
+                'front_feet_contact_forces': self.front_feet_contact_forces.tolist() if self.biped else None,
+                'feet_air_time': self._feet_air_time.tolist(),
+                'last_contacts': self._last_contacts.tolist(),
+            }
+            
+            # 안정성 메트릭
+            stability_metrics = {
+                'is_healthy': self.is_healthy,
+                'is_flipped_over': self.is_flipped_over,
+                'time_flipped_over': self._time_flipped_over,
+                'is_shoulder_below_pelvis': self.is_shoulder_below_pelvis,
+                'time_shoulder_below_pelvis': self._time_shoulder_below_pelvis,
+                'is_hip_on_ground': self.is_hip_on_ground,
+                'time_hip_on_ground': self._time_hip_on_ground,
+                'shoulder_below_pelvis_cost': float(self.shoulder_below_pelvis_cost),
+                'hip_ground_contact_cost': float(self.hip_ground_contact_cost),
+                'trunk_up_alignment': float(self._trunk_up_alignment),
+                'projected_gravity': self.projected_gravity.tolist(),
+                'balance_history': self._balance_history.copy() if hasattr(self, '_balance_history') else [],
+            }
+            
+            # 최근 액션 정보
+            action_info = {
+                'last_action': self._last_action.tolist(),
+                'last_feet_contact_forces': self._last_feet_contact_forces.tolist(),
+            }
+            
+            return {
+                'episode_info': episode_info,
+                'robot_state': robot_state,
+                'reward_info': reward_info,
+                'env_config': env_config,
+                'contact_info': contact_info,
+                'stability_metrics': stability_metrics,
+                'action_info': action_info,
+                'timestamp': time.time(),
+                'simulation_time': self.data.time,
+            }
+            
+        except Exception as e:
+            # 오류 발생 시 기본 정보만 반환
+            return {
+                'episode_info': {
+                    'episode_count': self._episode_count,
+                    'success_count': self._success_count,
+                    'error': str(e)
+                },
+                'timestamp': time.time(),
+                'error': f"상세 정보 수집 중 오류 발생: {str(e)}"
+            }
+    
+    def get_environment_summary(self):
+        """환경의 전체 요약 정보를 반환합니다. 실시간 저장용입니다."""
+        try:
+            return {
+                'environment_class': self.__class__.__name__,
+                'model_path': str(getattr(self, 'model_path', 'unknown')),
+                'observation_space': str(self.observation_space),
+                'action_space': str(self.action_space),
+                'metadata': self.metadata,
+                'frame_skip': self.frame_skip,
+                'dt': self.dt,
+                'max_episode_time_sec': self._max_episode_time_sec,
+                'reset_noise_scale': self._reset_noise_scale,
+                'clip_obs_threshold': self._clip_obs_threshold,
+                'max_balance_history': self._max_balance_history,
+                'curriculum_base': self._curriculum_base,
+                'tracking_velocity_sigma': self._tracking_velocity_sigma,
+                'desired_velocity_min': self._desired_velocity_min.tolist(),
+                'desired_velocity_max': self._desired_velocity_max.tolist(),
+                'obs_scale': self._obs_scale,
+                'gravity_vector': self._gravity_vector.tolist(),
+                'default_joint_position': self._default_joint_position.tolist(),
+                'bipedal_ready_joints': self.BIPEDAL_READY_JOINTS.tolist(),
+                'feet_site_names': list(self._feet_site_name_to_id.keys()),
+                'main_body_id': self._main_body_id,
+                'cfrc_ext_feet_indices': self._cfrc_ext_feet_indices,
+                'cfrc_ext_front_feet_indices': self._cfrc_ext_front_feet_indices,
+                'cfrc_ext_contact_indices': self._cfrc_ext_contact_indices,
+                'timestamp': time.time(),
+            }
+        except Exception as e:
+            return {
+                'environment_class': self.__class__.__name__,
+                'error': f"환경 요약 수집 중 오류 발생: {str(e)}",
+                'timestamp': time.time(),
+            }
+    
+    def get_performance_metrics(self):
+        """현재 에피소드의 성능 메트릭을 반환합니다. 실시간 저장용입니다."""
+        try:
+            # 보상 컴포넌트 계산
+            reward_components = {}
+            if hasattr(self, 'reward_weights'):
+                for key in self.reward_weights:
+                    if hasattr(self, key):
+                        try:
+                            reward_components[key] = float(getattr(self, key))
+                        except:
+                            reward_components[key] = 0.0
+            
+            # 비용 컴포넌트 계산
+            cost_components = {}
+            if hasattr(self, 'cost_weights'):
+                for key in self.cost_weights:
+                    if hasattr(self, key):
+                        try:
+                            cost_components[key] = float(getattr(self, key))
+                        except:
+                            cost_components[key] = 0.0
+            
+            # 안정성 점수
+            stability_score = 0.0
+            if hasattr(self, '_balance_history') and self._balance_history:
+                stability_score = float(np.mean(self._balance_history))
+            
+            # 진행률
+            progress = min(1.0, self._step / (self._max_episode_time_sec / self.dt))
+            
+            return {
+                'episode_progress': progress,
+                'current_step': self._step,
+                'max_steps': int(self._max_episode_time_sec / self.dt),
+                'reward_components': reward_components,
+                'cost_components': cost_components,
+                'stability_score': stability_score,
+                'is_healthy': self.is_healthy,
+                'is_flipped_over': self.is_flipped_over,
+                'time_flipped_over': self._time_flipped_over,
+                'is_shoulder_below_pelvis': self.is_shoulder_below_pelvis,
+                'time_shoulder_below_pelvis': self._time_shoulder_below_pelvis,
+                'is_hip_on_ground': self.is_hip_on_ground,
+                'time_hip_on_ground': self._time_hip_on_ground,
+                'curriculum_factor': self.curriculum_factor,
+                'timestamp': time.time(),
+            }
+        except Exception as e:
+            return {
+                'error': f"성능 메트릭 수집 중 오류 발생: {str(e)}",
+                'timestamp': time.time(),
+            }

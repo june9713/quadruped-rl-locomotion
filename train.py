@@ -13,6 +13,7 @@ from tqdm import tqdm
 from stable_baselines3.common.callbacks import CallbackList
 from training_callback import VideoRecordingCallback # VisualTrainingCallback import 추가
 from training_callback import VideoRecordingCallback, EnhancedVisualCallback
+from training_callback import VideoRecordingCallback, EnhancedVisualCallback, ComprehensiveSavingCallback
 
 # ✨ --- 수정된 부분 시작 --- ✨
 # Tcl/Tk 오류를 방지하기 위해 GUI 백엔드 대신 Agg 백엔드를 사용하도록 설정합니다.
@@ -39,17 +40,24 @@ plt.rcParams['axes.unicode_minus'] = False
 MODEL_DIR = "models"
 LOG_DIR = "logs"
 
-
 def train(args):
+    # ✨ --- 수정된 부분 시작 --- ✨
+    # `action_noise` 인자를 env_kwargs에 추가합니다.
+    env_kwargs = {
+        "ctrl_type": args.ctrl_type, 
+        "biped": args.biped, 
+        "rand_power": args.rand_power,
+        "action_noise": args.action_noise,
+    }
     vec_env = make_vec_env(
         Go1MujocoEnv,
-        env_kwargs={"ctrl_type": args.ctrl_type, "biped": args.biped, "rand_power": args.rand_power},
+        env_kwargs=env_kwargs,
         n_envs=args.num_parallel_envs,
         seed=args.seed,
         vec_env_cls=SubprocVecEnv,
     )
 
-    # 평가 및 비디오 녹화용 단일 환경 생성
+    # 평가 및 비디오 녹화용 단일 환경 생성 시에도 `action_noise`를 전달합니다.
     eval_record_env = Go1MujocoEnv(
         ctrl_type=args.ctrl_type,
         biped=args.biped,
@@ -58,7 +66,9 @@ def train(args):
         width=1024,
         height=768,
         rand_power=args.rand_power,
+        action_noise=args.action_noise,
     )
+    # ✨ --- 수정된 부분 끝 --- ✨
 
     train_time = time.strftime("%Y-%m-%d_%H-%M-%S")
     if args.run_name is None:
@@ -106,7 +116,16 @@ def train(args):
         initial_rand_power=args.rand_power
     )
 
-    callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback])
+    # ✨ [신규 추가] 실시간 저장 콜백
+    realtime_saving_callback = ComprehensiveSavingCallback(
+        save_dir=f"{model_path}/realtime_data",
+        save_frequency=1000,  # 매 1000 스텝마다 저장
+        checkpoint_frequency=10000,  # 매 10000 스텝마다 체크포인트
+        total_timesteps=args.total_timesteps,  # 전체 학습 타임스텝 수 전달
+        verbose=1
+    )
+
+    callback_list = CallbackList([enhanced_callback, video_callback, curriculum_callback, realtime_saving_callback])
 
     # ✨ [수정] PPO 모델을 불러오거나 생성할 때 learning_rate 인자 추가
     if args.model_path is not None:
@@ -136,7 +155,6 @@ def train(args):
     )
     # 최종 모델 저장
     model.save(f"{model_path}/final_model")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -220,6 +238,15 @@ if __name__ == "__main__":
         default=3e-4,  # PPO의 기본값
         help="The learning rate for the PPO optimizer.",
     )
+    
+    # ✨ --- 수정된 부분 시작 --- ✨
+    parser.add_argument(
+        "--action_noise",
+        type=float,
+        default=0.0,
+        help="Scale of the random noise added to actions every 0.5s.",
+    )
+    # ✨ --- 수정된 부분 끝 --- ✨
 
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

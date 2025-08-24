@@ -807,6 +807,8 @@ class BipedWalkingReward:
             'foot_scuff_penalty': -1.5,
             'low_height_penalty': -10.0,
             'rear_calf_contact_penalty': -5.0,
+            'roll_out_of_range_penalty': -15.0,  # ✅ [추가] Roll 각도 범위 위반 감점
+            'pitch_out_of_range_penalty': -15.0,  # ✅ [추가] Pitch 각도 범위 위반 감점
         }
         
         self._last_action = None
@@ -942,6 +944,26 @@ class BipedWalkingReward:
         total_reward += energy_penalty
         reward_info['penalty_energy'] = energy_penalty
 
+        # ✅ --- [추가] Roll과 Pitch 각도 범위 위반 감점 ---
+        current_roll = np.arcsin(2 * (trunk_quat[0] * trunk_quat[1] + trunk_quat[2] * trunk_quat[3]))
+        current_pitch = np.arcsin(-trunk_rotation_matrix[2, 0])
+        
+        # 각도 범위 정의 (라디안 단위)
+        healthy_roll_range = (-np.deg2rad(85), np.deg2rad(85))
+        healthy_pitch_range = (-np.deg2rad(140), -np.deg2rad(30))
+        
+        # Roll 각도 범위 위반 감점
+        if not (healthy_roll_range[0] < current_roll < healthy_roll_range[1]):
+            roll_penalty = self.weights['roll_out_of_range_penalty']
+            total_reward += roll_penalty
+            reward_info['penalty_roll_out_of_range'] = roll_penalty
+        
+        # Pitch 각도 범위 위반 감점
+        if not (healthy_pitch_range[0] < current_pitch < healthy_pitch_range[1]):
+            pitch_penalty = self.weights['pitch_out_of_range_penalty']
+            total_reward += pitch_penalty
+            reward_info['penalty_pitch_out_of_range'] = pitch_penalty
+
         if self._last_action is not None:
             action_rate_penalty = np.sum(np.square(action - self._last_action)) * self.weights['action_rate_penalty']
             total_reward += action_rate_penalty
@@ -1020,6 +1042,13 @@ class BipedalWalkingEnv(Go1MujocoEnv):
         self._last_x_position = 0.0
         self._no_progress_steps = 0
         self.episode_success_rate = 0.0
+        
+        # ✅ --- [추가] 각도 위반 지속 시간 추적 변수들 ---
+        self._roll_violation_start_time = None  # Roll 위반 시작 시간
+        self._pitch_violation_start_time = None  # Pitch 위반 시작 시간
+        self._max_angle_violation_duration = 1.0  # 최대 허용 위반 지속 시간 (초)
+        # 프레임 스킵과 dt는 부모 클래스에서 가져옴
+        self._max_violation_frames = None  # 초기화 후 설정
 
 
     # ------------------------------------------------------------------
@@ -1179,6 +1208,15 @@ class BipedalWalkingEnv(Go1MujocoEnv):
         self._last_x_position = self.data.qpos[0]
         self._no_progress_steps = 0
         
+        # ✅ --- [추가] 각도 위반 추적 변수들 초기화 ---
+        self._roll_violation_start_time = None
+        self._pitch_violation_start_time = None
+        
+        # 프레임 스킵과 dt를 기반으로 최대 위반 프레임 수 계산
+        frame_skip = getattr(self, 'frame_skip', 10)
+        dt = getattr(self, 'dt', 0.002)
+        self._max_violation_frames = int(self._max_angle_violation_duration / (frame_skip * dt))
+        
         # info 딕셔너리에 리셋 정보 추가
         info.update({
             'initial_height': self.data.qpos[2],
@@ -1232,6 +1270,11 @@ class BipedalWalkingEnv(Go1MujocoEnv):
             'bipedal_success': self._is_bipedal_success(),
             'termination_reason': reason if terminated else None,
             'current_success_rate': self.episode_success_rate,
+            # ✅ --- [추가] 각도 위반 상태 모니터링 정보 ---
+            'roll_violation_duration': (self.episode_length - self._roll_violation_start_time) if self._roll_violation_start_time is not None else 0,
+            'pitch_violation_duration': (self.episode_length - self._pitch_violation_start_time) if self._pitch_violation_start_time is not None else 0,
+            'current_roll_deg': np.rad2deg(self._quat_to_euler(self.data.qpos[3:7])[0]),
+            'current_pitch_deg': np.rad2deg(self._quat_to_euler(self.data.qpos[3:7])[1]),
             **reward_info
         }
 
@@ -1243,17 +1286,27 @@ class BipedalWalkingEnv(Go1MujocoEnv):
         if height < self._healthy_z_range[0] or height > self._healthy_z_range[1]:
              return True, f"height_out_of_range ({height:.2f})"
 
-        pitch = self._quat_to_euler(self.data.qpos[3:7])[1]
-        if not (self._healthy_pitch_range[0] < pitch < self._healthy_pitch_range[1]):
-            return True, f"pitch_out_of_range ({np.rad2deg(pitch):.1f} deg)"
-
-        # [수정] roll 값도 라디안 단위로 가져와서 라디안 범위와 비교
-        roll = self._quat_to_euler(self.data.qpos[3:7])[0]
-        if not (self._healthy_roll_range[0] < roll < self._healthy_roll_range[1]):
-            pass
-            # 출력할 때만 각도(degree)로 변환
-            #print(f"roll: {np.rad2deg(roll):.1f} deg"  , np.rad2deg(self._healthy_roll_range[0]) , np.rad2deg(self._healthy_roll_range[1]), self._healthy_roll_range[0] < roll  , self._healthy_roll_range[1] > roll)
-            #return True, f"roll_out_of_range ({np.rad2deg(roll):.1f} deg)"
+        # ✅ --- [수정] Roll과 Pitch 각도 범위 위반 및 지속 시간 체크 ---
+        current_roll = self._quat_to_euler(self.data.qpos[3:7])[0]
+        current_pitch = self._quat_to_euler(self.data.qpos[3:7])[1]
+        
+        # Roll 각도 범위 위반 체크
+        if not (self._healthy_roll_range[0] < current_roll < self._healthy_roll_range[1]):
+            if self._roll_violation_start_time is None:
+                self._roll_violation_start_time = self.episode_length
+            elif self.episode_length - self._roll_violation_start_time >= self._max_violation_frames:
+                return True, f"roll_violation_duration_exceeded ({np.rad2deg(current_roll):.1f} deg for {self._max_angle_violation_duration:.1f}s)"
+        else:
+            self._roll_violation_start_time = None
+        
+        # Pitch 각도 범위 위반 체크
+        if not (self._healthy_pitch_range[0] < current_pitch < self._healthy_pitch_range[1]):
+            if self._pitch_violation_start_time is None:
+                self._pitch_violation_start_time = self.episode_length
+            elif self.episode_length - self._pitch_violation_start_time >= self._max_violation_frames:
+                return True, f"pitch_violation_duration_exceeded ({np.rad2deg(current_pitch):.1f} deg for {self._max_angle_violation_duration:.1f}s)"
+        else:
+            self._pitch_violation_start_time = None
 
         linear_vel = np.linalg.norm(self.data.qvel[:3])
         angular_vel = np.linalg.norm(self.data.qvel[3:6])
