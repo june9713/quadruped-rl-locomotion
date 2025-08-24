@@ -164,6 +164,7 @@ class Go1MujocoEnv(MujocoEnv):
         self._time_flipped_over = 0.0 # 몸통 뒤집힘 타이머
         self._time_shoulder_below_pelvis = 0.0  # 어깨가 골반보다 낮을 때 타이머
         self._time_hip_on_ground = 0.0  # hip이 땅에 닿을 때 타이머
+        self._time_trunk_low = 0.0  # 몸통 높이가 낮을 때 타이머
     
     def _initialize_biped_body_ids(self):
         front_knee_body_names = ["FR_calf", "FL_calf"]
@@ -385,10 +386,16 @@ class Go1MujocoEnv(MujocoEnv):
     @property
     def biped_body_height_cost(self):
         z_pos = self.data.qpos[2]
-        if z_pos < 0.25:
-            penalty = np.exp((0.25 - z_pos) * 10) - 1
+        if z_pos < self._healthy_z_range[0]:
+            penalty = np.exp((self._healthy_z_range[0] - z_pos) * 10) - 1
             return penalty
         return 0.0
+        
+    @property
+    def is_trunk_low(self):
+        """몸통 높이가 낮은지 확인합니다."""
+        z_pos = self.data.qpos[2]
+        return z_pos < self._healthy_z_range[0]  # 0.25m 미만일 때 낮다고 판단
     
     @property
     def biped_roll_stability_cost(self):
@@ -523,6 +530,13 @@ class Go1MujocoEnv(MujocoEnv):
         if self._time_hip_on_ground > 1.0:
             return False, "hip_ground_contact_timeout", f"Hip on ground for {self._time_hip_on_ground:.2f}s > 1.0s"
         
+        # 몸통 높이가 낮을 때 타이머가 1초 이상 지속되면 에피소드 종료
+        if self._time_trunk_low > 1.0:
+            return False, "trunk_low_timeout", f"Trunk height low for {self._time_trunk_low:.2f}s > 1.0s"
+        
+        
+
+
         return True, "not_terminated", "Healthy"
     
     def step(self, action):
@@ -571,6 +585,12 @@ class Go1MujocoEnv(MujocoEnv):
             self._time_hip_on_ground += self.dt
         else:
             self._time_hip_on_ground = 0.0
+            
+        # 몸통 높이가 낮을 때 타이머 증가
+        if self.is_trunk_low:
+            self._time_trunk_low += self.dt
+        else:
+            self._time_trunk_low = 0.0
             
         observation = self._get_obs()
         reward, reward_info = self._calc_reward(action)
@@ -899,6 +919,7 @@ class Go1MujocoEnv(MujocoEnv):
         self._time_flipped_over = 0.0 # 몸통이 뒤집힌 경우 타이머
         self._time_shoulder_below_pelvis = 0.0  # 어깨가 골반보다 낮은 경우 타이머
         self._time_hip_on_ground = 0.0  # hip이 땅에 닿을 때 타이머
+        self._time_trunk_low = 0.0  # 몸통 높이가 낮은 경우 타이머
         
         # 보상 계산
         self._current_episode_reward = 0.0
@@ -1018,6 +1039,8 @@ class Go1MujocoEnv(MujocoEnv):
                 'time_shoulder_below_pelvis': self._time_shoulder_below_pelvis,
                 'is_hip_on_ground': self.is_hip_on_ground,
                 'time_hip_on_ground': self._time_hip_on_ground,
+                'is_trunk_low': self.is_trunk_low,
+                'time_trunk_low': self._time_trunk_low,
                 'shoulder_below_pelvis_cost': float(self.shoulder_below_pelvis_cost),
                 'hip_ground_contact_cost': float(self.hip_ground_contact_cost),
                 'trunk_up_alignment': float(self._trunk_up_alignment),
@@ -1137,6 +1160,8 @@ class Go1MujocoEnv(MujocoEnv):
                 'time_shoulder_below_pelvis': self._time_shoulder_below_pelvis,
                 'is_hip_on_ground': self.is_hip_on_ground,
                 'time_hip_on_ground': self._time_hip_on_ground,
+                'is_trunk_low': self.is_trunk_low,
+                'time_trunk_low': self._time_trunk_low,
                 'curriculum_factor': self.curriculum_factor,
                 'timestamp': time.time(),
             }
